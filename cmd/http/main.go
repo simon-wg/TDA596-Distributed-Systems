@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"slices"
 	"strings"
 )
 
@@ -17,10 +18,8 @@ func validateFileName(path string) bool {
 	validExtensions := []string{"html", "txt", "gif", "jpeg", "jpg", "css"}
 	splits := strings.Split(path, ".")
 	ext := splits[len(splits)-1]
-	for _, v := range validExtensions {
-		if ext == v {
-			return true
-		}
+	if slices.Contains(validExtensions, ext) {
+		return true
 	}
 	return false
 }
