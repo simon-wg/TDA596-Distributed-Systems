@@ -13,17 +13,17 @@ import (
 
 var root *os.Root
 
+const maxConnections = 10
+
 // Splits filepath on all '.'s and validates final element
 func validateFileName(path string) bool {
 	validExtensions := []string{"html", "txt", "gif", "jpeg", "jpg", "css"}
 	splits := strings.Split(path, ".")
 	ext := splits[len(splits)-1]
-	if slices.Contains(validExtensions, ext) {
-		return true
-	}
-	return false
+	return slices.Contains(validExtensions, ext)
 }
 
+// Handler for incoming request to distribute to handler according to HTTP method.
 func handler(c net.Conn) {
 	defer c.Close()
 	reader := bufio.NewReader(c)
@@ -60,6 +60,9 @@ func handler(c net.Conn) {
 	}
 }
 
+// Handler for GET requests, responds with requested file if exists.
+// If requested file doesn't exist, returns error 404.
+// If requested file can't be opened, returns error 500.
 func getHandler(c net.Conn, req *http.Request) error {
 	file, err := getFileIfExists(req)
 	res := &http.Response{
@@ -89,6 +92,7 @@ func getHandler(c net.Conn, req *http.Request) error {
 	return writeResponse(c, res)
 }
 
+// Helper function for setting correct content-type in HTTP header according to file-type.
 func setContentType(res *http.Response, fileName string) {
 	splits := strings.Split(fileName, ".")
 	ext := splits[len(splits)-1]
@@ -109,6 +113,7 @@ func setContentType(res *http.Response, fileName string) {
 	}
 }
 
+// Helper function to open file from server file-system.
 func getFileIfExists(req *http.Request) (*os.File, error) {
 	filePath := req.URL.Path[1:]
 	file, err := root.OpenFile(filePath, os.O_RDONLY, 0644)
@@ -118,6 +123,9 @@ func getFileIfExists(req *http.Request) (*os.File, error) {
 	return file, nil
 }
 
+// Handler for HTTP POST requests. Calls createFileIfNotExist(req) to write.
+// Returns error 409 if file with the same name and file-extension already exists.
+// Returns error 500 if file can't be created.
 func postHandler(c net.Conn, req *http.Request) error {
 	err := createFileIfNotExist(req)
 	res := &http.Response{
@@ -144,6 +152,7 @@ func postHandler(c net.Conn, req *http.Request) error {
 	return writeResponse(c, res)
 }
 
+// Creates file on server from request body if it doesn't already exist.
 func createFileIfNotExist(req *http.Request) error {
 	filePath := req.URL.Path[1:]
 	body := req.Body
@@ -157,12 +166,14 @@ func createFileIfNotExist(req *http.Request) error {
 	return err
 }
 
+// Helper function for setting error in HTTP response.
 func setError(res *http.Response, code int) {
 	res.StatusCode = code
 	res.Status = http.StatusText(code)
 	res.Body = http.NoBody
 }
 
+// Helper function for writing HTTP response to client TCP connection.
 func writeResponse(c net.Conn, res *http.Response) error {
 	return res.Write(c)
 }
@@ -193,16 +204,19 @@ func main() {
 		return
 	}
 
-	var semaphore = make(chan struct{}, 10)
+	// A buffered channel with size maxConnections (default 10), acts as a n=maxConnections semaphore for concurrent connections.
+	var semaphore = make(chan struct{}, maxConnections)
 
 	for {
+		// Always accept incoming connections.
 		c, err := l.Accept()
 		if err != nil {
 			fmt.Println("Failed to accept connection")
 			continue
 		}
+		// Add empty struct to the semaphore channel, blocks if full.
 		semaphore <- struct{}{}
-		// Create goroutine and handle connection
+		// Run goroutine and handle connection
 		go func() {
 			defer func() { <-semaphore }()
 			handler(c)
