@@ -34,10 +34,8 @@
       devShells = forEachSupportedSystem (
         { pkgs }:
         {
-          default = pkgs.mkShellNoCC {
+          default = pkgs.mkShell {
             packages = with pkgs; [
-              gcc
-
               # go (version is specified by overlay)
               go
 
