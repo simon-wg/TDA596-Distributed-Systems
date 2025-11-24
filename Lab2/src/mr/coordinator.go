@@ -1,20 +1,148 @@
 package mr
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"net/rpc"
 	"os"
+	"sync"
 )
+
+type FileStatuses struct {
+	v  map[int]int
+	mu sync.Mutex
+}
+
+type ReduceStatuses struct {
+	v  map[int]int
+	mu sync.Mutex
+}
+
+func (fs *FileStatuses) Get(key int) int {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	return fs.v[key]
+}
+
+func (fs *FileStatuses) Set(key int, value int) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	fs.v[key] = value
+}
+
+func (fs *FileStatuses) Len() int {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	return len(fs.v)
+}
+
+func (fs *FileStatuses) Lock() { fs.mu.Lock() }
+
+func (fs *FileStatuses) Unlock() { fs.mu.Unlock() }
+
+func (rs *ReduceStatuses) Get(key int) int {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	return rs.v[key]
+}
+
+func (rs *ReduceStatuses) Set(key int, value int) {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	rs.v[key] = value
+}
+
+func (rs *ReduceStatuses) Len() int {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	return len(rs.v)
+}
+
+func (rs *ReduceStatuses) Lock() { rs.mu.Lock() }
+
+func (rs *ReduceStatuses) Unlock() { rs.mu.Unlock() }
 
 type Coordinator struct {
 	// Your definitions here.
+	Files          []string
+	FileStatuses   FileStatuses
+	MappingDone    bool
+	ReduceStatuses ReduceStatuses
+	ReducingDone   bool
+	NReduce        int
 }
 
 // Your code here -- RPC handlers for the worker to call.
 func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply) error {
-	reply.FileName = "example.txt" // Placeholder filename
+	fmt.Println("Received RequestTask RPC")
+	if !c.MappingDone {
+		for file := range c.Files {
+			c.FileStatuses.Lock()
+			if c.FileStatuses.v[file] == 0 {
+				reply.FileName = c.Files[file]
+				reply.FileNumber = file
+				reply.NReduce = c.NReduce
+				reply.TaskType = Map
+				c.FileStatuses.v[file] = 1
+				c.FileStatuses.Unlock()
+				return nil
+			}
+			c.FileStatuses.Unlock()
+		}
+		// Check if mapping is done
+		allDone := true
+		for file := range c.FileStatuses.Len() {
+			if c.FileStatuses.Get(file) != 2 {
+				allDone = false
+				break
+			}
+		}
+		c.MappingDone = allDone
+		if !c.MappingDone {
+			reply.TaskType = Wait
+			return nil
+		}
+	}
+	for reduceTask := 0; reduceTask < c.NReduce; reduceTask++ {
+		c.ReduceStatuses.Lock()
+		if c.ReduceStatuses.v[reduceTask] == 0 {
+			reply.FileNumber = reduceTask
+			reply.NReduce = c.NReduce
+			reply.TaskType = Reduce
+			c.ReduceStatuses.v[reduceTask] = 1
+			c.ReduceStatuses.Unlock()
+			return nil
+		}
+		c.ReduceStatuses.Unlock()
+	}
+	allDone := true
+	for reduceTask := range c.ReduceStatuses.Len() {
+		if c.ReduceStatuses.Get(reduceTask) != 2 {
+			allDone = false
+			break
+		}
+	}
+	c.ReducingDone = allDone
+	if !c.ReducingDone {
+		reply.TaskType = Wait
+		return nil
+	}
+	// If all tasks are done
+	reply.FileNumber = -1
+	return nil
+}
+
+func (c *Coordinator) MapDone(args *MapDoneArgs, reply *MapDoneReply) error {
+	file := args.FileNumber
+	c.FileStatuses.Set(file, 2)
+	return nil
+}
+
+func (c *Coordinator) ReduceDone(args *ReduceDoneArgs, reply *ReduceDoneArgs) error {
+	file := args.FileNumber
+	c.ReduceStatuses.Set(file, 2)
 	return nil
 }
 
@@ -43,21 +171,37 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	ret := false
-
-	// Your code here.
-
-	return ret
+	for file := range c.FileStatuses.Len() {
+		if c.FileStatuses.Get(file) != 2 {
+			return false
+		}
+	} // Your code here.
+	for reduceTask := range c.ReduceStatuses.Len() {
+		if c.ReduceStatuses.Get(reduceTask) != 2 {
+			return false
+		}
+	}
+	return true
 }
 
 // create a Coordinator.
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	c := Coordinator{}
-
-	// Your code here.
-
+	fileStatuses := make(map[int]int)
+	for i := range fileStatuses {
+		fileStatuses[i] = 0
+	}
+	reduceStatuses := make(map[int]int)
+	for i := range nReduce {
+		reduceStatuses[i] = 0
+	}
+	c := Coordinator{
+		Files:          files,
+		FileStatuses:   FileStatuses{v: fileStatuses},
+		ReduceStatuses: ReduceStatuses{v: reduceStatuses},
+		NReduce:        nReduce,
+	}
 	c.server()
 	return &c
 }
