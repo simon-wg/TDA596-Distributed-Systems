@@ -6,3 +6,6 @@ wc:
 clean:
 	rm -rf mr-tmp
 	rm -f mr-*
+test:
+	go build -race -buildmode=plugin ../mrapps/wc.go
+	bash test-mr.sh
