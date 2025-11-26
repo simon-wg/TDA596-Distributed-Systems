@@ -8,6 +8,7 @@ import (
 	"net/rpc"
 	"os"
 	"sync"
+	"time"
 )
 
 type FileStatuses struct {
@@ -77,6 +78,7 @@ type Coordinator struct {
 // Your code here -- RPC handlers for the worker to call.
 func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply) error {
 	fmt.Println("Received RequestTask RPC")
+	//fmt.Println("Received RequestTask RPC")
 	if !c.MappingDone {
 		for file := range c.Files {
 			c.FileStatuses.Lock()
@@ -87,6 +89,7 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 				reply.TaskType = Map
 				c.FileStatuses.v[file] = 1
 				c.FileStatuses.Unlock()
+				go checkTimeoutMap(10, file, c)
 				return nil
 			}
 			c.FileStatuses.Unlock()
@@ -113,6 +116,7 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 			reply.TaskType = Reduce
 			c.ReduceStatuses.v[reduceTask] = 1
 			c.ReduceStatuses.Unlock()
+			go checkTimeoutReduce(10, reduceTask, c)
 			return nil
 		}
 		c.ReduceStatuses.Unlock()
@@ -204,4 +208,32 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	}
 	c.server()
 	return &c
+}
+
+// Checks that reduce status has changed after t seconds. If not resets reducestatus to 0 for redistribution of task.
+func checkTimeoutReduce(t int, file int, c *Coordinator) {
+	//fmt.Printf("Checking reduce timeout for file: %d \n", file)
+	stat := c.ReduceStatuses.Get(file)
+	time.Sleep(time.Duration(t) * time.Second)
+	c.ReduceStatuses.Lock()
+	if stat == c.ReduceStatuses.v[file] {
+		c.ReduceStatuses.v[file] = 0
+		fmt.Printf("Reducing failed for file %d: \n", file)
+	}
+	//fmt.Printf("Finished reduce timeout check for file: %d \n", file)
+	c.ReduceStatuses.Unlock()
+}
+
+// Checks that file status has changed after t seconds. If not resets filestatus to 0 for redistribution of task.
+func checkTimeoutMap(t int, file int, c *Coordinator) {
+	//fmt.Printf("Checking map timeout for file: %d \n", file)
+	stat := c.FileStatuses.Get(file)
+	time.Sleep(time.Duration(t) * time.Second)
+	c.FileStatuses.Lock()
+	if stat == c.FileStatuses.v[file] {
+		c.FileStatuses.v[file] = 0
+		fmt.Printf("Mapping failed for file %d: \n", file)
+	}
+	//fmt.Printf("Finished map timeout check for file: %d \n", file)
+	c.FileStatuses.Unlock()
 }
