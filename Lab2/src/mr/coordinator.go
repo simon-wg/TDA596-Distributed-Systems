@@ -77,7 +77,6 @@ type Coordinator struct {
 
 // Your code here -- RPC handlers for the worker to call.
 func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply) error {
-	fmt.Println("Received RequestTask RPC")
 	//fmt.Println("Received RequestTask RPC")
 	if !c.MappingDone {
 		for file := range c.Files {
