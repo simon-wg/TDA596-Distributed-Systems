@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log"
+	"net"
 	"net/rpc"
 	"os"
 	"time"
 )
+
+var workerIp string = ""
 
 // Map functions return a slice of KeyValue.
 type KeyValue struct {
@@ -28,6 +31,21 @@ func ihash(key string) int {
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
+	if workerIp == "" {
+		fmt.Println("Requesting local IP")
+		conn, err := net.Dial("tcp", "1.1.1.1:80")
+		fmt.Println("Connection established")
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer conn.Close()
+		workerIp, _, err = net.SplitHostPort(conn.LocalAddr().String())
+		if err != nil {
+			log.Fatal(err)
+		}
+		conn.Close()
+	}
+
 	// Your worker implementation here.
 
 	for {
@@ -46,7 +64,11 @@ func Worker(mapf func(string, string) []KeyValue,
 		switch taskType {
 		case Map:
 			fmt.Println("Starting Map task on file:", reply.FileName)
-			err := performMapTask(reply, mapf)
+			err := os.WriteFile(reply.FileName, reply.File[0], 0644)
+			if err != nil {
+				log.Fatal("cannot write file from coordinator", err)
+			}
+			err = performMapTask(reply, mapf)
 			if err != nil {
 				log.Fatal("Map task failed:", err)
 			}
@@ -124,7 +146,7 @@ func performReduceTask(reduceTask *RequestTaskReply, reducef func(string, []stri
 	if err != nil {
 		log.Fatal("cannot read dir", err)
 	}
-	prefix := fmt.Sprintf("mr-")
+	prefix := "mr-"
 	suffix := fmt.Sprintf("-%d", reduceTask.FileNumber)
 	for _, file := range files {
 		if !file.IsDir() && len(file.Name()) > len(prefix)+len(suffix) &&
@@ -187,7 +209,8 @@ func CallRequestTask() *RequestTaskReply {
 
 func CallMapDone(fileNumber int) error {
 	args := MapDoneArgs{
-		FileNumber: fileNumber,
+		FileNumber:   fileNumber,
+		WorkerAdress: workerIp,
 	}
 	reply := MapDoneReply{}
 
@@ -215,9 +238,7 @@ func CallReduceDone(fileNumber int) error {
 // usually returns true.
 // returns false if something goes wrong.
 func call(rpcname string, args interface{}, reply interface{}) bool {
-	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
-	sockname := coordinatorSock()
-	c, err := rpc.DialHTTP("unix", sockname)
+	c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
 	if err != nil {
 		log.Fatal("dialing:", err)
 	}

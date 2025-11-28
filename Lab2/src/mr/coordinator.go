@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-type FileStatuses struct {
+type MapStatuses struct {
 	v  map[int]int
 	mu sync.Mutex
 }
@@ -21,27 +21,32 @@ type ReduceStatuses struct {
 	mu sync.Mutex
 }
 
-func (fs *FileStatuses) Get(key int) int {
+type FileAddresses struct {
+	v  map[string]string
+	mu sync.Mutex
+}
+
+func (fs *MapStatuses) Get(key int) int {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 	return fs.v[key]
 }
 
-func (fs *FileStatuses) Set(key int, value int) {
+func (fs *MapStatuses) Set(key int, value int) {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 	fs.v[key] = value
 }
 
-func (fs *FileStatuses) Len() int {
+func (fs *MapStatuses) Len() int {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 	return len(fs.v)
 }
 
-func (fs *FileStatuses) Lock() { fs.mu.Lock() }
+func (fs *MapStatuses) Lock() { fs.mu.Lock() }
 
-func (fs *FileStatuses) Unlock() { fs.mu.Unlock() }
+func (fs *MapStatuses) Unlock() { fs.mu.Unlock() }
 
 func (rs *ReduceStatuses) Get(key int) int {
 	rs.mu.Lock()
@@ -65,38 +70,67 @@ func (rs *ReduceStatuses) Lock() { rs.mu.Lock() }
 
 func (rs *ReduceStatuses) Unlock() { rs.mu.Unlock() }
 
+func (fs *FileAddresses) Get(file string) string {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	return fs.v[file]
+}
+
+func (fs *FileAddresses) Set(file string, value string) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	fs.v[file] = value
+}
+
+func (fs *FileAddresses) Len() int {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	return len(fs.v)
+}
+
+func (fs *FileAddresses) Lock() { fs.mu.Lock() }
+
+func (fs *FileAddresses) Unlock() { fs.mu.Unlock() }
+
 type Coordinator struct {
 	// Your definitions here.
 	Files          []string
-	FileStatuses   FileStatuses
+	MapStatuses    MapStatuses
 	MappingDone    bool
 	ReduceStatuses ReduceStatuses
 	ReducingDone   bool
+	FileAddresses  FileAddresses
 	NReduce        int
 }
 
 // Your code here -- RPC handlers for the worker to call.
 func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply) error {
-	//fmt.Println("Received RequestTask RPC")
+	// fmt.Println("Received RequestTask RPC")
 	if !c.MappingDone {
 		for file := range c.Files {
-			c.FileStatuses.Lock()
-			if c.FileStatuses.v[file] == 0 {
+			c.MapStatuses.Lock()
+			if c.MapStatuses.v[file] == 0 {
+				reply.File = make([][]byte, 1)
+				data, err := os.ReadFile(c.Files[file])
+				if err != nil {
+					log.Fatal("cannot read file", err)
+				}
+				reply.File[0] = data
 				reply.FileName = c.Files[file]
 				reply.FileNumber = file
 				reply.NReduce = c.NReduce
 				reply.TaskType = Map
-				c.FileStatuses.v[file] = 1
-				c.FileStatuses.Unlock()
+				c.MapStatuses.v[file] = 1
+				c.MapStatuses.Unlock()
 				go checkTimeoutMap(10, file, c)
 				return nil
 			}
-			c.FileStatuses.Unlock()
+			c.MapStatuses.Unlock()
 		}
 		// Check if mapping is done
 		allDone := true
-		for file := range c.FileStatuses.Len() {
-			if c.FileStatuses.Get(file) != 2 {
+		for file := range c.MapStatuses.Len() {
+			if c.MapStatuses.Get(file) != 2 {
 				allDone = false
 				break
 			}
@@ -139,7 +173,12 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 
 func (c *Coordinator) MapDone(args *MapDoneArgs, reply *MapDoneReply) error {
 	file := args.FileNumber
-	c.FileStatuses.Set(file, 2)
+	workerAdress := args.WorkerAdress
+	for i := 0; i < c.NReduce; i++ {
+		intermediateFileName := fmt.Sprintf("mr-%d-%d", file, i)
+		c.FileAddresses.Set(intermediateFileName, workerAdress)
+	}
+	c.MapStatuses.Set(file, 2)
 	return nil
 }
 
@@ -161,10 +200,7 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 func (c *Coordinator) server() {
 	rpc.Register(c)
 	rpc.HandleHTTP()
-	//l, e := net.Listen("tcp", ":1234")
-	sockname := coordinatorSock()
-	os.Remove(sockname)
-	l, e := net.Listen("unix", sockname)
+	l, e := net.Listen("tcp", ":1234")
 	if e != nil {
 		log.Fatal("listen error:", e)
 	}
@@ -174,8 +210,8 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	for file := range c.FileStatuses.Len() {
-		if c.FileStatuses.Get(file) != 2 {
+	for file := range c.MapStatuses.Len() {
+		if c.MapStatuses.Get(file) != 2 {
 			return false
 		}
 	} // Your code here.
@@ -201,8 +237,9 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	}
 	c := Coordinator{
 		Files:          files,
-		FileStatuses:   FileStatuses{v: fileStatuses},
+		MapStatuses:    MapStatuses{v: fileStatuses},
 		ReduceStatuses: ReduceStatuses{v: reduceStatuses},
+		FileAddresses:  FileAddresses{v: make(map[string]string)},
 		NReduce:        nReduce,
 	}
 	c.server()
@@ -226,13 +263,13 @@ func checkTimeoutReduce(t int, file int, c *Coordinator) {
 // Checks that file status has changed after t seconds. If not resets filestatus to 0 for redistribution of task.
 func checkTimeoutMap(t int, file int, c *Coordinator) {
 	//fmt.Printf("Checking map timeout for file: %d \n", file)
-	stat := c.FileStatuses.Get(file)
+	stat := c.MapStatuses.Get(file)
 	time.Sleep(time.Duration(t) * time.Second)
-	c.FileStatuses.Lock()
-	if stat == c.FileStatuses.v[file] {
-		c.FileStatuses.v[file] = 0
+	c.MapStatuses.Lock()
+	if stat == c.MapStatuses.v[file] {
+		c.MapStatuses.v[file] = 0
 		fmt.Printf("Mapping failed for file %d: \n", file)
 	}
 	//fmt.Printf("Finished map timeout check for file: %d \n", file)
-	c.FileStatuses.Unlock()
+	c.MapStatuses.Unlock()
 }
