@@ -133,6 +133,7 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 				c.MapStatuses.v[file] = 1
 				c.MapStatuses.Unlock()
 				go checkTimeoutMap(10, file, c)
+				fmt.Println("Starting map task for file:", c.Files[file])
 				return nil
 			}
 			c.MapStatuses.Unlock()
@@ -161,6 +162,7 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 			c.ReduceStatuses.v[reduceTask] = 1
 			c.ReduceStatuses.Unlock()
 			go checkTimeoutReduce(10, reduceTask, c)
+			fmt.Println("Starting reduce task:", reduceTask)
 			return nil
 		}
 		c.ReduceStatuses.Unlock()
@@ -197,6 +199,7 @@ func (c *Coordinator) MapDone(args *MapDoneArgs, reply *MapDoneReply) error {
 func (c *Coordinator) ReduceDone(args *ReduceDoneArgs, reply *ReduceDoneReply) error {
 	file := args.FileNumber
 	c.ReduceStatuses.Set(file, 2)
+	fmt.Printf("Reduce task %d done\n", file)
 	return nil
 }
 

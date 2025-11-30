@@ -46,5 +46,5 @@ type RequestReduceFilesArgs struct {
 }
 
 type RequestReduceFilesReply struct {
-	Files [][]byte
+	Files map[string][]byte
 }

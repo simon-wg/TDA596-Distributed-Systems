@@ -251,25 +251,15 @@ func GetFilesFromWorker(address string, reduceNumber int) {
 		ReduceNumber: reduceNumber,
 	}
 	reply := RequestReduceFilesReply{}
-
 	ok := callWorker("WorkerServer.RequestReduceFiles", &args, &reply, address)
 	if !ok {
 		fmt.Printf("call to worker failed!\n")
 	}
 	// Write files to local disk
-	for i, fileContent := range reply.Files {
-		tempFile, err := os.CreateTemp("mr-tmp", "mr-reduce-*")
+	for fileName, data := range reply.Files {
+		err := os.WriteFile(fileName, data, 0644)
 		if err != nil {
-			log.Fatal("cannot create temp file", err)
-		}
-		_, err = tempFile.Write(fileContent)
-		if err != nil {
-			log.Fatal("cannot write to temp file", err)
-		}
-		tempFile.Close()
-		err = os.Rename(tempFile.Name(), fmt.Sprintf("mr-%d-%d", i, reduceNumber))
-		if err != nil {
-			log.Fatal("cannot rename temp file", err)
+			log.Fatal("cannot write file from worker", err)
 		}
 	}
 }
@@ -310,27 +300,25 @@ func callWorker(rpcname string, args interface{}, reply interface{}, address str
 
 func (w *WorkerServer) RequestReduceFiles(args *RequestReduceFilesArgs, reply *RequestReduceFilesReply) error {
 	reduceNumber := args.ReduceNumber
-	var files [][]byte
-	// Finds all files in cwd with mr-*-ReduceNumber
-	dirEntries, err := os.ReadDir(".")
+	reply.Files = make(map[string][]byte)
+	prefix := "mr-"
+	suffix := fmt.Sprintf("-%d", reduceNumber)
+	files, err := os.ReadDir(".")
 	if err != nil {
 		log.Fatal("cannot read dir", err)
 	}
-	prefix := "mr-"
-	suffix := fmt.Sprintf("-%d", reduceNumber)
-	for _, entry := range dirEntries {
-		if !entry.IsDir() && len(entry.Name()) > len(prefix)+len(suffix) &&
-			entry.Name()[:len(prefix)] == prefix &&
-			entry.Name()[len(entry.Name())-len(suffix):] == suffix {
+	for _, file := range files {
+		if !file.IsDir() && len(file.Name()) > len(prefix)+len(suffix) &&
+			file.Name()[:len(prefix)] == prefix &&
+			file.Name()[len(file.Name())-len(suffix):] == suffix {
 			// Found a matching file
-			content, err := os.ReadFile(entry.Name())
+			data, err := os.ReadFile(file.Name())
 			if err != nil {
 				log.Fatal("cannot read file", err)
 			}
-			files = append(files, content)
+			reply.Files[file.Name()] = data
 		}
 	}
-	reply.Files = files
 	return nil
 }
 
