@@ -340,6 +340,7 @@ func (w *WorkerServer) server() {
 	if e != nil {
 		log.Fatal("listen error:", e)
 	}
+	fmt.Println("Worker listening on", l.Addr().String())
 	workerPort = l.Addr().(*net.TCPAddr).Port
 	go http.Serve(l, nil)
 }
