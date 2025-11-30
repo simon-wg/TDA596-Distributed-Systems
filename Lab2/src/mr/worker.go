@@ -37,6 +37,8 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// start worker rpc server
+	w := WorkerServer{}
+	w.server()
 
 	if workerIp == "" {
 		fmt.Println("Requesting local IP")
@@ -340,7 +342,6 @@ func (w *WorkerServer) server() {
 	if e != nil {
 		log.Fatal("listen error:", e)
 	}
-	fmt.Println("Worker listening on", l.Addr().String())
 	workerPort = l.Addr().(*net.TCPAddr).Port
 	go http.Serve(l, nil)
 }
