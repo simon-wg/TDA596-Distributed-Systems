@@ -72,7 +72,6 @@ func Worker(mapf func(string, string) []KeyValue,
 		taskType := reply.TaskType
 		switch taskType {
 		case Map:
-			fmt.Println("Starting Map task on file:", reply.FileName)
 			err := os.WriteFile(reply.FileName, reply.File[0], 0644)
 			if err != nil {
 				log.Fatal("cannot write file from coordinator", err)
@@ -86,11 +85,10 @@ func Worker(mapf func(string, string) []KeyValue,
 				log.Fatal("MapDone RPC failed:", err)
 			}
 		case Reduce:
-			// Placeholder for Reduce task
-			fmt.Println("Starting Reduce task", reply.FileNumber)
 			err := performReduceTask(reply, reducef)
 			if err != nil {
-				log.Fatal("Reduce task failed:", err)
+				log.Println("Reduce task failed:", err)
+				continue
 			}
 			err = CallReduceDone(reply.FileNumber)
 			if err != nil {
@@ -151,7 +149,10 @@ func performReduceTask(reduceTask *RequestTaskReply, reducef func(string, []stri
 	reduceMap := map[string][]string{}
 	reduceResult := map[string]string{}
 	for _, address := range reduceTask.FileAddresses {
-		GetFilesFromWorker(address, reduceTask.FileNumber)
+		err := GetFilesFromWorker(address, reduceTask.FileNumber)
+		if err != nil {
+			return err
+		}
 	}
 
 	files, err := os.ReadDir(".")
@@ -246,14 +247,14 @@ func CallReduceDone(fileNumber int) error {
 	return nil
 }
 
-func GetFilesFromWorker(address string, reduceNumber int) {
+func GetFilesFromWorker(address string, reduceNumber int) error {
 	args := RequestReduceFilesArgs{
 		ReduceNumber: reduceNumber,
 	}
 	reply := RequestReduceFilesReply{}
 	ok := callWorker("WorkerServer.RequestReduceFiles", &args, &reply, address)
 	if !ok {
-		fmt.Printf("call to worker failed!\n")
+		return fmt.Errorf("call to worker failed")
 	}
 	// Write files to local disk
 	for fileName, data := range reply.Files {
@@ -262,6 +263,7 @@ func GetFilesFromWorker(address string, reduceNumber int) {
 			log.Fatal("cannot write file from worker", err)
 		}
 	}
+	return nil
 }
 
 // send an RPC request to the coordinator, wait for the response.
@@ -287,6 +289,7 @@ func callWorker(rpcname string, args interface{}, reply interface{}, address str
 	c, err := rpc.DialHTTP("tcp", address)
 	if err != nil {
 		log.Fatal("dialing:", err)
+		return false
 	}
 	defer c.Close()
 	err = c.Call(rpcname, args, reply)
