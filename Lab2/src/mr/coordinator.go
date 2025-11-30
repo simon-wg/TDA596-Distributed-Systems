@@ -296,7 +296,7 @@ func checkTimeoutMap(t int, file int, c *Coordinator) {
 	stat := c.MapStatuses.Get(file)
 	time.Sleep(time.Duration(t) * time.Second)
 	c.MapStatuses.Lock()
-	if stat == c.MapStatuses.v[file] {
+	if stat == c.MapStatuses.Get(file) {
 		fmt.Printf("Mapping failed for file %d: \n", file)
 	}
 	c.MapStatuses.Unlock()

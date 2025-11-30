@@ -84,6 +84,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			if err != nil {
 				log.Fatal("MapDone RPC failed:", err)
 			}
+			fmt.Println("Completed map task for file:", reply.FileName)
 		case Reduce:
 			err := performReduceTask(reply, reducef)
 			if err != nil {
@@ -94,6 +95,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			if err != nil {
 				log.Fatal("ReduceDone RPC failed:", err)
 			}
+			fmt.Println("Completed reduce task:", reply.FileNumber)
 		}
 	}
 }
