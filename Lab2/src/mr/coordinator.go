@@ -132,17 +132,15 @@ type Coordinator struct {
 	// Your definitions here.
 	Files          []string
 	MapStatuses    MapStatuses
-	MappingDone    bool
 	ReduceStatuses ReduceStatuses
-	ReducingDone   bool
 	FileAddresses  FileAddresses
 	NReduce        int
 }
 
 // Your code here -- RPC handlers for the worker to call.
 func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply) error {
-	// fmt.Println("Received RequestTask RPC")
-	if !c.MappingDone {
+	fmt.Println("Received RequestTask RPC")
+	if !c.MapStatuses.Done() {
 		for file := range c.Files {
 			c.MapStatuses.Lock()
 			if c.MapStatuses.v[file] == 0 {
@@ -158,7 +156,7 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 				reply.TaskType = Map
 				c.MapStatuses.v[file] = 1
 				c.MapStatuses.Unlock()
-				go checkTimeoutMap(10, file, c)
+				//go checkTimeoutMap(10, file, c)
 				fmt.Println("Starting map task for file:", c.Files[file])
 				return nil
 			}
@@ -174,6 +172,11 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 		}
 		c.MapStatuses.SetDone(allDone)
 		if !c.MapStatuses.Done() {
+			c.MapStatuses.Lock()
+			for mapTask := range c.MapStatuses.v {
+				fmt.Println("Map task", mapTask, "status:", c.MapStatuses.v[mapTask])
+			}
+			c.MapStatuses.Unlock()
 			reply.TaskType = Wait
 			return nil
 		}
@@ -187,7 +190,7 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 			reply.FileAddresses = c.FileAddresses.GetAdresses(reduceTask)
 			c.ReduceStatuses.v[reduceTask] = 1
 			c.ReduceStatuses.Unlock()
-			go checkTimeoutReduce(10, reduceTask, c)
+			//go checkTimeoutReduce(10, reduceTask, c)
 			fmt.Println("Starting reduce task:", reduceTask)
 			return nil
 		}
@@ -276,6 +279,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		NReduce:        nReduce,
 	}
 	c.server()
+	go c.checkTimeouts(10)
 	return &c
 }
 
@@ -285,9 +289,9 @@ func checkTimeoutReduce(t int, file int, c *Coordinator) {
 	stat := c.ReduceStatuses.Get(file)
 	time.Sleep(time.Duration(t) * time.Second)
 	if stat == c.ReduceStatuses.Get(file) {
-		fmt.Printf("Reducing failed for file %d: \n", file)
+		fmt.Printf("Reducing failed for file: %d\n", file)
 	}
-	restartAllTasks(c)
+	c.restartAllTasks()
 }
 
 // Checks that file status has changed after t seconds. If not, restart all tasks.
@@ -295,15 +299,52 @@ func checkTimeoutMap(t int, file int, c *Coordinator) {
 	//fmt.Printf("Checking map timeout for file: %d \n", file)
 	stat := c.MapStatuses.Get(file)
 	time.Sleep(time.Duration(t) * time.Second)
-	c.MapStatuses.Lock()
 	if stat == c.MapStatuses.Get(file) {
 		fmt.Printf("Mapping failed for file %d: \n", file)
 	}
-	c.MapStatuses.Unlock()
-	restartAllTasks(c)
+	c.restartAllTasks()
 }
 
-func restartAllTasks(c *Coordinator) {
+func (c *Coordinator) checkTimeouts(t int) {
+	for {
+		mapDone := c.MapStatuses.Done()
+		if mapDone {
+			initialReduceStatuses := make(map[int]int)
+			c.ReduceStatuses.Lock()
+			for k, v := range c.ReduceStatuses.v {
+				initialReduceStatuses[k] = v
+			}
+			c.ReduceStatuses.Unlock()
+			time.Sleep(time.Duration(t) * time.Second)
+			c.ReduceStatuses.Lock()
+			for k, v := range c.ReduceStatuses.v {
+				if v == initialReduceStatuses[k] && v != 2 && v != 0 {
+					fmt.Printf("Reducing failed for task: %d\n", k)
+					c.restartAllTasks()
+				}
+			}
+			c.ReduceStatuses.Unlock()
+		} else {
+			initialMapStatuses := make(map[int]int)
+			c.MapStatuses.Lock()
+			for k, v := range c.MapStatuses.v {
+				initialMapStatuses[k] = v
+			}
+			c.MapStatuses.Unlock()
+			time.Sleep(time.Duration(t) * time.Second)
+			c.MapStatuses.Lock()
+			for k, v := range c.MapStatuses.v {
+				if v == initialMapStatuses[k] && v != 2 && v != 0 {
+					fmt.Printf("Mapping failed for file: %d\n", k)
+					c.restartAllTasks()
+				}
+			}
+			c.MapStatuses.Unlock()
+		}
+	}
+}
+
+func (c *Coordinator) restartAllTasks() {
 	// Restart map tasks
 	c.MapStatuses.Lock()
 	for file := range c.MapStatuses.v {
@@ -311,11 +352,13 @@ func restartAllTasks(c *Coordinator) {
 	}
 	c.MapStatuses.Unlock()
 	c.MapStatuses.SetDone(false)
-	// Restart reduce tasks
 	c.ReduceStatuses.Lock()
 	for reduceTask := range c.ReduceStatuses.v {
 		c.ReduceStatuses.v[reduceTask] = 0
 	}
 	c.ReduceStatuses.Unlock()
+	c.FileAddresses.Lock()
+	c.FileAddresses.v = make(map[string]string)
+	c.FileAddresses.Unlock()
 	c.ReduceStatuses.SetDone(false)
 }
