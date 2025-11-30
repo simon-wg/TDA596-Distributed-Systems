@@ -170,12 +170,16 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 				break
 			}
 		}
+		fmt.Println("SetDone")
 		c.MapStatuses.SetDone(allDone)
+		fmt.Println("Done")
 		if !c.MapStatuses.Done() {
+			fmt.Println("Lock")
 			c.MapStatuses.Lock()
 			for mapTask := range c.MapStatuses.v {
 				fmt.Println("Map task", mapTask, "status:", c.MapStatuses.v[mapTask])
 			}
+			fmt.Println("Unlock")
 			c.MapStatuses.Unlock()
 			reply.TaskType = Wait
 			return nil
@@ -316,14 +320,13 @@ func (c *Coordinator) checkTimeouts(t int) {
 			}
 			c.ReduceStatuses.Unlock()
 			time.Sleep(time.Duration(t) * time.Second)
-			c.ReduceStatuses.Lock()
-			for k, v := range c.ReduceStatuses.v {
-				if v == initialReduceStatuses[k] && v != 2 && v != 0 {
-					fmt.Printf("Reducing failed for task: %d\n", k)
+			for i := range c.ReduceStatuses.Len() {
+				if c.ReduceStatuses.Get(i) == initialReduceStatuses[i] && initialReduceStatuses[i] != 2 && initialReduceStatuses[i] != 0 {
+					fmt.Printf("Reducing failed for task: %d\n", i)
 					c.restartAllTasks()
+					break
 				}
 			}
-			c.ReduceStatuses.Unlock()
 		} else {
 			initialMapStatuses := make(map[int]int)
 			c.MapStatuses.Lock()
@@ -332,14 +335,13 @@ func (c *Coordinator) checkTimeouts(t int) {
 			}
 			c.MapStatuses.Unlock()
 			time.Sleep(time.Duration(t) * time.Second)
-			c.MapStatuses.Lock()
-			for k, v := range c.MapStatuses.v {
-				if v == initialMapStatuses[k] && v != 2 && v != 0 {
-					fmt.Printf("Mapping failed for file: %d\n", k)
+			for i := range c.MapStatuses.Len() {
+				if c.MapStatuses.Get(i) == initialMapStatuses[i] && initialMapStatuses[i] != 2 && initialMapStatuses[i] != 0 {
+					fmt.Printf("Mapping failed for file: %d\n", i)
 					c.restartAllTasks()
+					break
 				}
 			}
-			c.MapStatuses.Unlock()
 		}
 	}
 }
