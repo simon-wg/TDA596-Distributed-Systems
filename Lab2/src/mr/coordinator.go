@@ -70,10 +70,20 @@ func (rs *ReduceStatuses) Lock() { rs.mu.Lock() }
 
 func (rs *ReduceStatuses) Unlock() { rs.mu.Unlock() }
 
-func (fs *FileAddresses) Get(file string) string {
+func (fs *FileAddresses) GetAdresses(reduceNumber int) []string {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
-	return fs.v[file]
+	var addresses []string
+	prefix := "mr-"
+	suffix := fmt.Sprintf("-%d", reduceNumber)
+	for file, address := range fs.v {
+		if len(file) > len(prefix)+len(suffix) &&
+			file[:len(prefix)] == prefix &&
+			file[len(file)-len(suffix):] == suffix {
+			addresses = append(addresses, address)
+		}
+	}
+	return addresses
 }
 
 func (fs *FileAddresses) Set(file string, value string) {
@@ -147,6 +157,7 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 			reply.FileNumber = reduceTask
 			reply.NReduce = c.NReduce
 			reply.TaskType = Reduce
+			reply.FileAddresses = c.FileAddresses.GetAdresses(reduceTask)
 			c.ReduceStatuses.v[reduceTask] = 1
 			c.ReduceStatuses.Unlock()
 			go checkTimeoutReduce(10, reduceTask, c)
@@ -179,20 +190,13 @@ func (c *Coordinator) MapDone(args *MapDoneArgs, reply *MapDoneReply) error {
 		c.FileAddresses.Set(intermediateFileName, workerAdress)
 	}
 	c.MapStatuses.Set(file, 2)
+	fmt.Printf("Map task %d done, intermediate files stored at worker %s\n", file, workerAdress)
 	return nil
 }
 
-func (c *Coordinator) ReduceDone(args *ReduceDoneArgs, reply *ReduceDoneArgs) error {
+func (c *Coordinator) ReduceDone(args *ReduceDoneArgs, reply *ReduceDoneReply) error {
 	file := args.FileNumber
 	c.ReduceStatuses.Set(file, 2)
-	return nil
-}
-
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
-func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
 	return nil
 }
 
@@ -200,7 +204,7 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 func (c *Coordinator) server() {
 	rpc.Register(c)
 	rpc.HandleHTTP()
-	l, e := net.Listen("tcp", ":1234")
+	l, e := net.Listen("tcp4", ":1234")
 	if e != nil {
 		log.Fatal("listen error:", e)
 	}

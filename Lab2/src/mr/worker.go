@@ -6,17 +6,22 @@ import (
 	"hash/fnv"
 	"log"
 	"net"
+	"net/http"
 	"net/rpc"
 	"os"
 	"time"
 )
 
 var workerIp string = ""
+var workerPort int
 
 // Map functions return a slice of KeyValue.
 type KeyValue struct {
 	Key   string
 	Value string
+}
+
+type WorkerServer struct {
 }
 
 // use ihash(key) % NReduce to choose the reduce
@@ -30,6 +35,8 @@ func ihash(key string) int {
 // main/mrworker.go calls this function.
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
+
+	// start worker rpc server
 
 	if workerIp == "" {
 		fmt.Println("Requesting local IP")
@@ -141,7 +148,10 @@ func performMapTask(mapTask *RequestTaskReply, mapf func(string, string) []KeyVa
 func performReduceTask(reduceTask *RequestTaskReply, reducef func(string, []string) string) error {
 	reduceMap := map[string][]string{}
 	reduceResult := map[string]string{}
-	// Finds all files in cwd with mr-*-FileNumber
+	for _, address := range reduceTask.FileAddresses {
+		GetFilesFromWorker(address, reduceTask.FileNumber)
+	}
+
 	files, err := os.ReadDir(".")
 	if err != nil {
 		log.Fatal("cannot read dir", err)
@@ -210,7 +220,7 @@ func CallRequestTask() *RequestTaskReply {
 func CallMapDone(fileNumber int) error {
 	args := MapDoneArgs{
 		FileNumber:   fileNumber,
-		WorkerAdress: workerIp,
+		WorkerAdress: fmt.Sprintf("%s:%d", workerIp, workerPort),
 	}
 	reply := MapDoneReply{}
 
@@ -234,6 +244,34 @@ func CallReduceDone(fileNumber int) error {
 	return nil
 }
 
+func GetFilesFromWorker(address string, reduceNumber int) {
+	args := RequestReduceFilesArgs{
+		ReduceNumber: reduceNumber,
+	}
+	reply := RequestReduceFilesReply{}
+
+	ok := callWorker("WorkerServer.RequestReduceFiles", &args, &reply, address)
+	if !ok {
+		fmt.Printf("call to worker failed!\n")
+	}
+	// Write files to local disk
+	for i, fileContent := range reply.Files {
+		tempFile, err := os.CreateTemp("mr-tmp", "mr-reduce-*")
+		if err != nil {
+			log.Fatal("cannot create temp file", err)
+		}
+		_, err = tempFile.Write(fileContent)
+		if err != nil {
+			log.Fatal("cannot write to temp file", err)
+		}
+		tempFile.Close()
+		err = os.Rename(tempFile.Name(), fmt.Sprintf("mr-%d-%d", i, reduceNumber))
+		if err != nil {
+			log.Fatal("cannot rename temp file", err)
+		}
+	}
+}
+
 // send an RPC request to the coordinator, wait for the response.
 // usually returns true.
 // returns false if something goes wrong.
@@ -251,4 +289,57 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 
 	fmt.Println(err)
 	return false
+}
+
+func callWorker(rpcname string, args interface{}, reply interface{}, address string) bool {
+	c, err := rpc.DialHTTP("tcp", address)
+	if err != nil {
+		log.Fatal("dialing:", err)
+	}
+	defer c.Close()
+	err = c.Call(rpcname, args, reply)
+	if err == nil {
+		return true
+	}
+
+	fmt.Println(err)
+	return false
+}
+
+func (w *WorkerServer) RequestReduceFiles(args *RequestReduceFilesArgs, reply *RequestReduceFilesReply) error {
+	reduceNumber := args.ReduceNumber
+	var files [][]byte
+	// Finds all files in cwd with mr-*-ReduceNumber
+	dirEntries, err := os.ReadDir(".")
+	if err != nil {
+		log.Fatal("cannot read dir", err)
+	}
+	prefix := "mr-"
+	suffix := fmt.Sprintf("-%d", reduceNumber)
+	for _, entry := range dirEntries {
+		if !entry.IsDir() && len(entry.Name()) > len(prefix)+len(suffix) &&
+			entry.Name()[:len(prefix)] == prefix &&
+			entry.Name()[len(entry.Name())-len(suffix):] == suffix {
+			// Found a matching file
+			content, err := os.ReadFile(entry.Name())
+			if err != nil {
+				log.Fatal("cannot read file", err)
+			}
+			files = append(files, content)
+		}
+	}
+	reply.Files = files
+	return nil
+}
+
+// start a thread that listens for RPCs from other workers
+func (w *WorkerServer) server() {
+	rpc.Register(w)
+	rpc.HandleHTTP()
+	l, e := net.Listen("tcp4", ":0")
+	if e != nil {
+		log.Fatal("listen error:", e)
+	}
+	workerPort = l.Addr().(*net.TCPAddr).Port
+	go http.Serve(l, nil)
 }
