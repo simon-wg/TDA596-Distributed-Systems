@@ -290,7 +290,7 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 func callWorker(rpcname string, args interface{}, reply interface{}, address string) bool {
 	c, err := rpc.DialHTTP("tcp", address)
 	if err != nil {
-		log.Fatal("dialing:", err)
+		log.Println("dialing:", err)
 		return false
 	}
 	defer c.Close()
