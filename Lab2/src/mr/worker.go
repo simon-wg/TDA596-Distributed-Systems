@@ -40,6 +40,7 @@ func Worker(mapf func(string, string) []KeyValue,
 	w := WorkerServer{}
 	w.server()
 
+	// Sets worker IP to local IP
 	if workerIp == "" {
 		fmt.Println("Requesting local IP")
 		conn, err := net.Dial("tcp", "1.1.1.1:80")
@@ -55,8 +56,7 @@ func Worker(mapf func(string, string) []KeyValue,
 		conn.Close()
 	}
 
-	// Your worker implementation here.
-
+	// Repeatedly requests tasks from coordinator until all tasks are done
 	for {
 		// We check what task we have.
 		reply := CallRequestTask()
@@ -100,6 +100,7 @@ func Worker(mapf func(string, string) []KeyValue,
 	}
 }
 
+// Performs the map task given by the coordinator
 func performMapTask(mapTask *RequestTaskReply, mapf func(string, string) []KeyValue) error {
 	// Reads file given by reply
 	content, err := os.ReadFile(mapTask.FileName)
@@ -147,7 +148,10 @@ func performMapTask(mapTask *RequestTaskReply, mapf func(string, string) []KeyVa
 	return nil
 }
 
+// Performs the reduce task given by the coordinator
 func performReduceTask(reduceTask *RequestTaskReply, reducef func(string, []string) string) error {
+
+	// Downloads intermediate files from other workers
 	reduceMap := map[string][]string{}
 	reduceResult := map[string]string{}
 	for _, address := range reduceTask.FileAddresses {
@@ -157,6 +161,7 @@ func performReduceTask(reduceTask *RequestTaskReply, reducef func(string, []stri
 		}
 	}
 
+	// Reads all mr-*-ReduceTask.FileNumber files
 	files, err := os.ReadDir(".")
 	if err != nil {
 		log.Fatal("cannot read dir", err)
@@ -199,6 +204,7 @@ func performReduceTask(reduceTask *RequestTaskReply, reducef func(string, []stri
 			log.Fatal("cannot write to output file", err)
 		}
 	}
+	
 	outputFile.Close()
 	err = os.Rename(outputFile.Name(), fmt.Sprintf("mr-out-%d", reduceTask.FileNumber))
 	if err != nil {
@@ -207,6 +213,7 @@ func performReduceTask(reduceTask *RequestTaskReply, reducef func(string, []stri
 	return nil
 }
 
+// Sends a RequestTask to the coordinator and returns the reply
 func CallRequestTask() *RequestTaskReply {
 	// declare an argument structure.
 	args := RequestTaskArgs{}
@@ -222,6 +229,7 @@ func CallRequestTask() *RequestTaskReply {
 	return &reply
 }
 
+// Sends a MapDone RPC to the coordinator
 func CallMapDone(fileNumber int) error {
 	args := MapDoneArgs{
 		FileNumber:   fileNumber,
@@ -236,6 +244,7 @@ func CallMapDone(fileNumber int) error {
 	return nil
 }
 
+// Sends a ReduceDone RPC to the coordinator
 func CallReduceDone(fileNumber int) error {
 	args := ReduceDoneArgs{
 		FileNumber: fileNumber,
@@ -249,6 +258,7 @@ func CallReduceDone(fileNumber int) error {
 	return nil
 }
 
+// Requests reduce files from another worker
 func GetFilesFromWorker(address string, reduceNumber int) error {
 	args := RequestReduceFilesArgs{
 		ReduceNumber: reduceNumber,
@@ -287,6 +297,7 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 	return false
 }
 
+// send an RPC request to another worker, wait for the response.
 func callWorker(rpcname string, args interface{}, reply interface{}, address string) bool {
 	c, err := rpc.DialHTTP("tcp", address)
 	if err != nil {
@@ -303,6 +314,7 @@ func callWorker(rpcname string, args interface{}, reply interface{}, address str
 	return false
 }
 
+// Serves reduce files to other workers
 func (w *WorkerServer) RequestReduceFiles(args *RequestReduceFilesArgs, reply *RequestReduceFilesReply) error {
 	reduceNumber := args.ReduceNumber
 	reply.Files = make(map[string][]byte)
