@@ -41,6 +41,14 @@ type ReduceDoneArgs struct {
 type ReduceDoneReply struct {
 }
 
+type MissingArgs struct {
+	WorkerAdress string
+	ReduceNumber int
+}
+
+type MissingReply struct {
+}
+
 type RequestReduceFilesArgs struct {
 	ReduceNumber int
 }
@@ -48,3 +56,4 @@ type RequestReduceFilesArgs struct {
 type RequestReduceFilesReply struct {
 	Files map[string][]byte
 }
+

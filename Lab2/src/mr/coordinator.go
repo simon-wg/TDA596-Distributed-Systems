@@ -89,6 +89,9 @@ func (c *Coordinator) sendReduceTask(reduceId int, reply *RequestTaskReply) bool
 }
 
 func (c *Coordinator) MapDone(args *MapDoneArgs, reply *MapDoneReply) error {
+	if c.MapStatuses.Get(args.FileNumber) != 1 {
+		return nil
+	}
 	file := args.FileNumber
 	workerAdress := args.WorkerAdress
 	for i := 0; i < c.NReduce; i++ {
@@ -103,6 +106,27 @@ func (c *Coordinator) ReduceDone(args *ReduceDoneArgs, reply *ReduceDoneReply) e
 	file := args.FileNumber
 	c.ReduceStatuses.Set(file, 2)
 	return nil
+}
+
+// Called by worker if connection is unavailable when requesting a file from another worker.
+// Assigns the files at that worker as not started.
+func (c *Coordinator) Missing(args *MissingArgs, reply *MissingReply) error {
+	c.FileAddresses.Lock()
+	defer c.FileAddresses.Unlock()
+	c.ReduceStatuses.Set(args.ReduceNumber, 0)
+	for file, address := range c.FileAddresses.v {
+		if address == args.WorkerAdress {
+			c.MapStatuses.Set(extractFileNumber(file), 0)
+		}
+	}
+	
+	return nil
+}
+
+func extractFileNumber(file string) int {
+	var fileNumber int
+	fmt.Sscanf(file, "mr-%d-", &fileNumber)
+	return fileNumber
 }
 
 // start a thread that listens for RPCs from worker.go
@@ -142,15 +166,16 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		NReduce:        nReduce,
 	}
 	c.server()
-	go c.checkTimeouts(10)
+	go c.checkTimeouts(4)
 	return &c
 }
 
-// Checks status for all active files changed after t seconds. If not, restart all tasks.
+// Checks for timeouts in mapping and reducing tasks
 func (c *Coordinator) checkTimeouts(t int) {
 	for {
 		mapDone := c.MapStatuses.Done()
 		if mapDone {
+			// If we are done mapping we don't need to worry about mapping timeouts
 			initialReduceStatuses := make(map[int]int)
 			c.ReduceStatuses.Lock()
 			for k, v := range c.ReduceStatuses.v {
@@ -159,9 +184,9 @@ func (c *Coordinator) checkTimeouts(t int) {
 			c.ReduceStatuses.Unlock()
 			time.Sleep(time.Duration(t) * time.Second)
 			for i := range c.ReduceStatuses.Len() {
-				if c.ReduceStatuses.Get(i) == initialReduceStatuses[i] && initialReduceStatuses[i] != 2 && initialReduceStatuses[i] != 0 {
+				if c.ReduceStatuses.Get(i) == initialReduceStatuses[i] && initialReduceStatuses[i] == 1 {
 					fmt.Printf("Reducing failed for task: %d\n", i)
-					c.restartAllTasks()
+					c.ReduceStatuses.Set(i, 0)
 					break
 				}
 			}
@@ -174,32 +199,14 @@ func (c *Coordinator) checkTimeouts(t int) {
 			c.MapStatuses.Unlock()
 			time.Sleep(time.Duration(t) * time.Second)
 			for i := range c.MapStatuses.Len() {
-				if c.MapStatuses.Get(i) == initialMapStatuses[i] && initialMapStatuses[i] != 2 && initialMapStatuses[i] != 0 {
+				if c.MapStatuses.Get(i) == initialMapStatuses[i] && initialMapStatuses[i] == 1 {
 					fmt.Printf("Mapping failed for file: %d\n", i)
-					c.restartAllTasks()
+					c.MapStatuses.Set(i, 0)
 					break
 				}
 			}
 		}
 	}
-}
-
-// Resets all tasks to state 0 (not started). Used to restart MapReduce after timeout.
-func (c *Coordinator) restartAllTasks() {
-	// Restart map tasks
-	c.MapStatuses.Lock()
-	for file := range c.MapStatuses.v {
-		c.MapStatuses.v[file] = 0
-	}
-	c.MapStatuses.Unlock()
-	c.ReduceStatuses.Lock()
-	for reduceTask := range c.ReduceStatuses.v {
-		c.ReduceStatuses.v[reduceTask] = 0
-	}
-	c.ReduceStatuses.Unlock()
-	c.FileAddresses.Lock()
-	c.FileAddresses.v = make(map[string]string)
-	c.FileAddresses.Unlock()
 }
 
 // Types for concurrent reads of file/job statuses

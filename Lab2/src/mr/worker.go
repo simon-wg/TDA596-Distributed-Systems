@@ -60,6 +60,9 @@ func Worker(mapf func(string, string) []KeyValue,
 	for {
 		// We check what task we have.
 		reply := CallRequestTask()
+		if reply == nil {
+			return
+		}
 		if reply.FileNumber == -1 {
 			fmt.Println("Job's Done")
 			break
@@ -204,7 +207,7 @@ func performReduceTask(reduceTask *RequestTaskReply, reducef func(string, []stri
 			log.Fatal("cannot write to output file", err)
 		}
 	}
-	
+
 	outputFile.Close()
 	err = os.Rename(outputFile.Name(), fmt.Sprintf("mr-out-%d", reduceTask.FileNumber))
 	if err != nil {
@@ -223,7 +226,7 @@ func CallRequestTask() *RequestTaskReply {
 
 	ok := call("Coordinator.RequestTask", &args, &reply)
 	if !ok {
-		fmt.Printf("call failed!\n")
+		return nil
 	}
 
 	return &reply
@@ -239,7 +242,7 @@ func CallMapDone(fileNumber int) error {
 
 	ok := call("Coordinator.MapDone", &args, &reply)
 	if !ok {
-		return fmt.Errorf("call failed")
+		return nil
 	}
 	return nil
 }
@@ -253,7 +256,17 @@ func CallReduceDone(fileNumber int) error {
 
 	ok := call("Coordinator.ReduceDone", &args, &reply)
 	if !ok {
-		return fmt.Errorf("call failed")
+		return nil
+	}
+	return nil
+}
+
+func CallMissing(address string, reduceNumber int) error {
+	args := MissingArgs{WorkerAdress: address, ReduceNumber: reduceNumber }
+	reply := MissingReply{}
+	ok := call("Coordinator.Missing", &args, &reply)
+	if !ok {
+		return fmt.Errorf("call to worker failed")
 	}
 	return nil
 }
@@ -266,6 +279,7 @@ func GetFilesFromWorker(address string, reduceNumber int) error {
 	reply := RequestReduceFilesReply{}
 	ok := callWorker("WorkerServer.RequestReduceFiles", &args, &reply, address)
 	if !ok {
+		CallMissing(address, reduceNumber)
 		return fmt.Errorf("call to worker failed")
 	}
 	// Write files to local disk
@@ -282,19 +296,14 @@ func GetFilesFromWorker(address string, reduceNumber int) error {
 // usually returns true.
 // returns false if something goes wrong.
 func call(rpcname string, args interface{}, reply interface{}) bool {
-	c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
+	c, err := rpc.DialHTTP("tcp4", "127.0.0.1:1234")
 	if err != nil {
-		log.Fatal("dialing:", err)
+		return false
 	}
 	defer c.Close()
 
 	err = c.Call(rpcname, args, reply)
-	if err == nil {
-		return true
-	}
-
-	fmt.Println(err)
-	return false
+	return err == nil
 }
 
 // send an RPC request to another worker, wait for the response.
