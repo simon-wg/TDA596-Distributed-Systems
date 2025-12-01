@@ -166,7 +166,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		NReduce:        nReduce,
 	}
 	c.server()
-	go c.checkTimeouts(4)
+	go c.checkTimeouts(10)
 	return &c
 }
 
