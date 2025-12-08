@@ -1,3 +1,3 @@
-module example.com/raft
+module raft
 
 go 1.25.2
