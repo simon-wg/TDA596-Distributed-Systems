@@ -4,18 +4,15 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
-	"net"
 	"os"
 	"raft/pkg/chord"
 	"strings"
 )
 
 func main() {
-	var address net.IP
-	flag.TextVar(&address, "a", net.IPv4(0, 0, 0, 0), "Address to listen on")
+	address := flag.String("a", "", "Address to listen on")
 	port := flag.Int("p", -1, "Port to listen on")
-	var joinAddress net.IP
-	flag.TextVar(&joinAddress, "ja", net.IPv4(0, 0, 0, 0), "Address to join")
+	joinAddress := flag.String("ja", "", "Address to join")
 	joinPort := flag.Int("jp", -1, "Port to join")
 	stabilizationTime := flag.Int("ts", -1, "Time in milliseconds between invocation of stabilize")
 	fixFingerTime := flag.Int("tff", -1, "Time in milliseconds between invocations of fix fingers")
@@ -25,69 +22,125 @@ func main() {
 
 	flag.Parse()
 
+	// TODO: Add validation for address
+
 	if *port == -1 {
 		fmt.Println("Please provide a port using -p flag")
 		return
 	}
 
-	if address.IsUnspecified() {
-		fmt.Println("Please provide a valid address using -a flag")
-		return
-	}
-
-	if *joinPort != -1 && joinAddress.IsUnspecified() {
-		fmt.Println("Please provide a join address using --ja flag")
-		return
-	}
-
-	if *joinPort == -1 && !joinAddress.IsUnspecified() {
-		fmt.Println("Please provide a join port using --jp flag")
-		return
-	}
+	// TODO: Add validation for join port and join address
 
 	if *stabilizationTime == -1 || *stabilizationTime < 1 || *stabilizationTime > 60000 {
 		fmt.Println("Please specify stabilization time in the range [1,60000] using the --ts flag")
+		return
 	}
 	if *fixFingerTime == -1 || *fixFingerTime < 1 || *fixFingerTime > 60000 {
 		fmt.Println("Please specify time to fix fingers in the range [1,60000] using the --tff flag")
+		return
 	}
 	if *checkPredTime == -1 || *checkPredTime < 1 || *checkPredTime > 60000 {
 		fmt.Println("Please specify 'check predeccessor' time in the range [1,60000] using the --tcp flag")
+		return
 	}
 	if *successorLimit == -1 || *successorLimit < 1 || *successorLimit > 32 {
 		fmt.Println("Please specify successor limit in the range [1,32] using the --r flag")
+		return
 	}
 	if *identifier != "" && len(*identifier) != 40 && !isHexString(*identifier) {
 		fmt.Println("Identifier must be a 40 character long hex string")
 		return
 	}
 
-	node := chord.StartNode()
-	if !joinAddress.IsUnspecified() {
-		node.Join(fmt.Sprintf("%s:%d", joinAddress.String(), *joinPort))
+	node := chord.StartNode(*address, *port, *successorLimit, *identifier, *stabilizationTime, *fixFingerTime, *checkPredTime)
+	if joinAddress != nil && *joinPort != -1 {
+		node.Join(fmt.Sprintf("%s:%d", *joinAddress, *joinPort))
 	}
+
+	// TODO: Start goroutines for stabilize, fix fingers, check predecessor
+	// TODO: Start RPC server to listen for incoming requests
 
 	reader := bufio.NewReader(os.Stdin)
 	for {
 		input, _ := reader.ReadString('\n')
 		input = strings.TrimSpace(input)
+		if len(input) == 0 {
+			fmt.Println("Please enter a command")
+			continue
+		}
 		slices := strings.Fields(input)
 		cmd := slices[0]
 
 		switch cmd {
 		case "Lookup":
-			fmt.Println("Lookup called")
+			if len(slices) < 2 {
+				fmt.Println("Please provide a file name to lookup")
+				continue
+			}
+			fileName := slices[1]
+			lookup(fileName)
+			continue
 
 		case "StoreFile":
-			fmt.Println("StoreFile called")
+			if len(slices) < 2 {
+				fmt.Println("Please provide a file path to store")
+				continue
+			}
+			filePath := slices[1]
+			storeFile(filePath)
+			continue
 
 		case "PrintState":
-			fmt.Println("PrintState called")
+			printState(node)
+			continue
 
+		default:
+			fmt.Println("Unknown command")
+			continue
 		}
-
 	}
 }
+
+func lookup(fileName string) {
+	fmt.Println("Lookup called")
+
+}
+
+func storeFile(filePath string) {
+	fmt.Println("StoreFile called")
+
+}
+
+func printState(node *chord.Node) {
+	// Client info
+	fmt.Println("-----")
+	fmt.Printf("Node ID: %s\n", node.Id)
+	fmt.Printf("Node Address: %s\n", node.Address)
+	fmt.Printf("Node Predecessor: %s\n", node.Predecessor)
+	fmt.Println("-----")
+
+	// Successors info
+	for i, successor := range node.Successors {
+		if successor == "" {
+			continue
+		}
+		fmt.Printf("Successor %d: %s\n", i, successor)
+		fmt.Printf("Successor %d ID: %s\n", i, chord.HashAddress(successor))
+		fmt.Println("-----")
+	}
+
+	// Fingertable info
+	for i, finger := range node.FingerTable {
+		if finger == "" {
+			continue
+		}
+		fmt.Printf("Finger %d: %s\n", i, finger)
+		fmt.Printf("Finger %d ID: %s\n", i, chord.HashAddress(finger))
+		fmt.Println("-----")
+	}
+}
+
+
 
 func isHexString(s string) bool {
 	for _, c := range s {
