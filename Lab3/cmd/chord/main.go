@@ -130,7 +130,9 @@ func printState(node *chord.Node) {
 	}
 
 	// Fingertable info
-	for i, finger := range node.FingerTable {
+	// for i, finger := range node.FingerTable {
+	for i := 0; i < 3; i++ {
+		finger := node.FingerTable[i]
 		if finger == "" {
 			continue
 		}
@@ -139,8 +141,6 @@ func printState(node *chord.Node) {
 		fmt.Println("-----")
 	}
 }
-
-
 
 func isHexString(s string) bool {
 	for _, c := range s {

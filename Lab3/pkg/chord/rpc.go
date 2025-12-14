@@ -2,8 +2,8 @@ package chord
 
 import (
 	"fmt"
+	"math/big"
 	"net/rpc"
-	"time"
 )
 
 func CallAlive(address string) bool {
@@ -17,8 +17,8 @@ func CallAlive(address string) bool {
 	return true
 }
 
-func CallFindSuccessor(address string, id string) string {
-	req := &FindSuccessorArgs{Id: id}
+func CallFindSuccessor(address string, id *big.Int) string {
+	req := &FindSuccessorArgs{Id: *id}
 	resp := &FindSuccessorReply{}
 	err := CallCommand(address, "FindSuccessor", req, resp)
 	if err != nil {
@@ -48,23 +48,28 @@ func CallGetPredecessor(address string) string {
 	return resp.Predecessor
 }
 
+func CallGetSuccessors(address string) []string {
+	req := &GetSuccessorsArgs{}
+	resp := &GetSuccessorsReply{}
+	err := CallCommand(address, "GetSuccessors", req, resp)
+	if err != nil {
+		fmt.Printf("Error getting successors: %v\n", err)
+		return []string{}
+	}
+	return resp.Successors
+}
+
 func CallCommand(address string, method string, req interface{}, resp interface{}) error {
-	c := make(chan error, 1)
 	client, err := rpc.DialHTTP("tcp", address)
 	if err != nil {
 		return fmt.Errorf("error dialing %s: %v", address, err)
 	}
 	defer client.Close()
-	go func() { c <- client.Call("Node."+method, req, resp) }()
-	select {
-		case err := <-c:
-			if err != nil {
-				return fmt.Errorf("error calling %s on %s: %v", method, address, err)
-			}
-			return nil
-		case <-time.After(5 * time.Second):
-			return fmt.Errorf("timeout calling %s on %s", method, address)
+	err = client.Call("Node."+method, req, resp)
+	if err != nil {
+		return fmt.Errorf("error calling %s on %s: %v", method, address, err)
 	}
+	return nil
 }
 
 func (n *Node) Alive(args *struct{}, reply *struct{}) error {
@@ -74,33 +79,39 @@ func (n *Node) Alive(args *struct{}, reply *struct{}) error {
 func (n *Node) FindSuccessor(args *FindSuccessorArgs, reply *FindSuccessorReply) error {
 	id := args.Id
 	n.mu.RLock()
-	defer n.mu.RUnlock()
 	for _, successor := range n.Successors {
 		if successor == "" {
 			continue
 		}
-		successorId := HashAddress(successor)
-		if id > n.Id && id <= successorId {
+		successorIdInclusive := new(big.Int).Add(HashAddress(successor), big.NewInt(1))
+		if IsBetween(&id, n.Id, successorIdInclusive) {
 			reply.Successor = successor
+			n.mu.RUnlock()
 			return nil
 		}
 	}
-	closestPrecedingNode := n.ClosestPrecedingNode(id)
+	n.mu.RUnlock()
+	closestPrecedingNode := n.ClosestPrecedingNode(&id)
 	// TODO: Double check that this is correct for larger rings
+	n.mu.RLock()
 	if closestPrecedingNode == n.Address {
 		reply.Successor = n.Successors[0]
+		n.mu.RUnlock()
 		return nil
 	}
-	successor := CallFindSuccessor(closestPrecedingNode, id)
+	n.mu.RUnlock()
+	successor := CallFindSuccessor(closestPrecedingNode, &id)
 	reply.Successor = successor
 	return nil
 }
 
 func (n *Node) Notify(args *NotifyArgs, reply *NotifyReply) error {
 	address := args.Address
+	id := HashAddress(address)
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if n.Predecessor == "" || address > n.Predecessor && address < n.Id {
+	predId := HashAddress(n.Predecessor)
+	if n.Predecessor == "" || IsBetween(id, predId, n.Id) {
 		n.Predecessor = address
 	}
 	return nil
@@ -113,19 +124,32 @@ func (n *Node) GetPredecessor(args *GetPredecessorArgs, reply *GetPredecessorRep
 	return nil
 }
 
-type FindSuccessorArgs struct{
-	Id string
+func (n *Node) GetSuccessors(args *GetSuccessorsArgs, reply *GetSuccessorsReply) error {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	reply.Successors = make([]string, len(n.Successors))
+	copy(reply.Successors, n.Successors)
+	return nil
 }
-type FindSuccessorReply struct{
+
+type FindSuccessorArgs struct {
+	Id big.Int
+}
+type FindSuccessorReply struct {
 	Successor string
 }
 
-type NotifyArgs struct{
+type NotifyArgs struct {
 	Address string
 }
 type NotifyReply struct{}
 
 type GetPredecessorArgs struct{}
-type GetPredecessorReply struct{
+type GetPredecessorReply struct {
 	Predecessor string
+}
+
+type GetSuccessorsArgs struct{}
+type GetSuccessorsReply struct {
+	Successors []string
 }
