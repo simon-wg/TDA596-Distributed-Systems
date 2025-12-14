@@ -118,17 +118,12 @@ func (n *Node) Notify(args *NotifyArgs, reply *NotifyReply) error {
 }
 
 func (n *Node) GetPredecessor(args *GetPredecessorArgs, reply *GetPredecessorReply) error {
-	n.mu.RLock()
-	defer n.mu.RUnlock()
-	reply.Predecessor = n.Predecessor
+	reply.Predecessor = n.ReadPredecessor()
 	return nil
 }
 
 func (n *Node) GetSuccessors(args *GetSuccessorsArgs, reply *GetSuccessorsReply) error {
-	n.mu.RLock()
-	defer n.mu.RUnlock()
-	reply.Successors = make([]string, len(n.Successors))
-	copy(reply.Successors, n.Successors)
+	reply.Successors = n.ReadSuccessors()
 	return nil
 }
 

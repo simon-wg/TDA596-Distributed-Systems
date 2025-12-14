@@ -72,6 +72,14 @@ func main() {
 		cmd := slices[0]
 
 		switch cmd {
+		case "l":
+			if len(slices) < 2 {
+				fmt.Println("Please provide a file name to lookup")
+				continue
+			}
+			fileName := slices[1]
+			lookup(fileName)
+			continue
 		case "Lookup":
 			if len(slices) < 2 {
 				fmt.Println("Please provide a file name to lookup")
@@ -81,6 +89,14 @@ func main() {
 			lookup(fileName)
 			continue
 
+		case "sf":
+			if len(slices) < 2 {
+				fmt.Println("Please provide a file path to store")
+				continue
+			}
+			filePath := slices[1]
+			storeFile(filePath)
+			continue
 		case "StoreFile":
 			if len(slices) < 2 {
 				fmt.Println("Please provide a file path to store")
@@ -90,8 +106,11 @@ func main() {
 			storeFile(filePath)
 			continue
 
+		case "ps":
+			node.PrintState()
+			continue
 		case "PrintState":
-			printState(node)
+			node.PrintState()
 			continue
 
 		default:
@@ -109,37 +128,6 @@ func lookup(fileName string) {
 func storeFile(filePath string) {
 	fmt.Println("StoreFile called")
 
-}
-
-func printState(node *chord.Node) {
-	// Client info
-	fmt.Println("-----")
-	fmt.Printf("Node ID: %s\n", node.Id)
-	fmt.Printf("Node Address: %s\n", node.Address)
-	fmt.Printf("Node Predecessor: %s\n", node.Predecessor)
-	fmt.Println("-----")
-
-	// Successors info
-	for i, successor := range node.Successors {
-		if successor == "" {
-			continue
-		}
-		fmt.Printf("Successor %d: %s\n", i, successor)
-		fmt.Printf("Successor %d ID: %s\n", i, chord.HashAddress(successor))
-		fmt.Println("-----")
-	}
-
-	// Fingertable info
-	// for i, finger := range node.FingerTable {
-	for i := 0; i < 3; i++ {
-		finger := node.FingerTable[i]
-		if finger == "" {
-			continue
-		}
-		fmt.Printf("Finger %d: %s\n", i, finger)
-		fmt.Printf("Finger %d ID: %s\n", i, chord.HashAddress(finger))
-		fmt.Println("-----")
-	}
 }
 
 func isHexString(s string) bool {

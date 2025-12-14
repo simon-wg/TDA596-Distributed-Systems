@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/rpc"
+	"slices"
 	"sync"
 	"time"
 )
@@ -20,12 +21,13 @@ var (
 )
 
 type Node struct {
-	mu          *sync.RWMutex
-	Address     string
-	Id          *big.Int
-	Predecessor string
-	Successors  []string
-	FingerTable []string
+	mu             *sync.RWMutex
+	SuccessorLimit int
+	Address        string
+	Id             *big.Int
+	Predecessor    string
+	Successors     []string
+	FingerTable    []string
 }
 
 func (n *Node) startRpcServer() {
@@ -43,10 +45,11 @@ func (n *Node) startRpcServer() {
 // Plz
 func StartNode(address string, port int, successorLimit int, identifier string, stabilizationTime int, fixFingerTime int, checkPredTime int) *Node {
 	n := &Node{
-		mu:          &sync.RWMutex{},
-		Address:     fmt.Sprintf("%s:%d", address, port),
-		FingerTable: make([]string, Sha1BitSize),
-		Successors:  make([]string, successorLimit),
+		mu:             &sync.RWMutex{},
+		SuccessorLimit: successorLimit,
+		Address:        fmt.Sprintf("%s:%d", address, port),
+		FingerTable:    make([]string, Sha1BitSize),
+		Successors:     make([]string, successorLimit),
 	}
 	n.create()
 	if identifier != "" {
@@ -105,7 +108,7 @@ func (n *Node) fixFingers() {
 	}
 	reply := &FindSuccessorReply{}
 	n.mu.Unlock()
-	err := n.FindSuccessor(args, reply) //CallFindSuccessor(n.Address, n.Id + fmt.Sprintf("%x", 1<<uint(next)))
+	err := n.FindSuccessor(args, reply)
 	if err != nil {
 		fmt.Printf("Error fixing finger %d: %v\n", next, err)
 		return
@@ -117,34 +120,19 @@ func (n *Node) fixFingers() {
 
 func (n *Node) stabilize() {
 	var x string
-	n.mu.RLock()
-	successor := n.Successors[0]
-	n.mu.RUnlock()
+	successor := n.ReadSuccessor()
 
 	for {
 		if successor != n.Address && !CallAlive(successor) {
-			// Successor is dead, remove it
-			n.mu.Lock()
-			fmt.Printf("Successor %s is dead, removing it\n", successor)
-			n.Successors[0] = ""
-			// Shift successors
-			ShiftArrayLeft(n.Successors)
-			successor = n.Successors[0]
-			n.mu.Unlock()
+			successor = n.PopSuccessor()
 		} else {
 			break
 		}
 	}
-	newSuccessors := CallGetSuccessors(successor)
-	ShiftArrayRightAndInsert(newSuccessors, successor)
-	n.mu.Lock()
-	n.Successors = newSuccessors
-	n.mu.Unlock()
+	n.UpdateSuccessors(CallGetSuccessors(successor), successor)
 	// Get successor's predecessor
 	if successor == n.Address {
-		n.mu.RLock()
-		x = n.Predecessor
-		n.mu.RUnlock()
+		x = n.ReadPredecessor()
 	} else {
 		x = CallGetPredecessor(successor)
 	}
@@ -152,9 +140,7 @@ func (n *Node) stabilize() {
 	successorId := HashAddress(successor)
 	if x != "" {
 		xId := HashAddress(x)
-		n.mu.RLock()
-		nId := n.Id
-		n.mu.RUnlock()
+		nId := n.ReadID()
 		if IsBetween(xId, nId, successorId) {
 			n.mu.Lock()
 			n.Successors[0] = x
@@ -175,11 +161,15 @@ func (n *Node) stabilize() {
 }
 
 func (n *Node) checkPredecessor() {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	if n.Predecessor != "" && n.Predecessor != n.Address {
-		if !CallAlive(n.Predecessor) {
-			n.Predecessor = ""
+	pred := n.ReadPredecessor()
+
+	if pred != "" && pred != n.Address {
+		if !CallAlive(pred) {
+			n.mu.Lock()
+			if n.Predecessor == pred {
+				n.Predecessor = ""
+			}
+			n.mu.Unlock()
 		}
 	}
 }
@@ -220,16 +210,86 @@ func IsBetween(id, start, end *big.Int) bool {
 	}
 }
 
-func ShiftArrayLeft(arr []string) {
-	for i := 0; i < len(arr)-1; i++ {
-		arr[i] = arr[i+1]
+func (n *Node) PopSuccessor() string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for i := 0; i < len(n.Successors)-1; i++ {
+		n.Successors[i] = n.Successors[i+1]
 	}
-	arr[len(arr)-1] = ""
+	n.Successors[len(n.Successors)-1] = ""
+	return n.Successors[0]
 }
 
-func ShiftArrayRightAndInsert(arr []string, value string) {
-	for i := len(arr) - 1; i > 0; i-- {
-		arr[i] = arr[i-1]
+func (n *Node) UpdateSuccessors(ns []string, s string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.Successors[0] = s
+	if slices.Compare(n.Successors[1:], ns[:len(ns)-1]) == 0 {
+		return
 	}
-	arr[0] = value
+	for i := 0; i < len(ns)-1 && i+1 < len(n.Successors); i++ {
+		n.Successors[i+1] = ns[i]
+	}
+}
+
+func (n *Node) ReadPredecessor() string {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.Predecessor
+}
+
+func (n *Node) ReadSuccessor() string {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	if len(n.Successors) == 0 {
+		return ""
+	}
+	return n.Successors[0]
+}
+
+func (n *Node) ReadSuccessors() []string {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	successors := make([]string, len(n.Successors))
+	copy(successors, n.Successors)
+	return successors
+}
+
+func (n *Node) ReadID() *big.Int {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.Id
+}
+
+func (n *Node) PrintState() {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+
+	// Client info
+	fmt.Println("=====")
+	fmt.Printf("Node ID: %s\n", n.Id)
+	fmt.Printf("Node Address: %s\n", n.Address)
+	fmt.Println("=====")
+	fmt.Printf("Predecessor: %s\n", n.Predecessor)
+	fmt.Printf("Predecessor ID: %s\n", HashAddress(n.Predecessor))
+	fmt.Println("=====")
+
+	// Successors info
+	for i, successor := range n.Successors {
+		fmt.Printf("Successor %d: %s\n", i, successor)
+		fmt.Printf("Successor %d ID: %s\n", i, HashAddress(successor))
+		fmt.Println("-----")
+	}
+
+	// Fingertable info
+	limit := min(len(n.FingerTable), 3)
+	for i := range limit {
+		finger := n.FingerTable[i]
+		if finger == "" {
+			continue
+		}
+		fmt.Printf("Finger %d: %s\n", i, finger)
+		fmt.Printf("Finger %d ID: %s\n", i, HashAddress(finger))
+		fmt.Println("-----")
+	}
 }
