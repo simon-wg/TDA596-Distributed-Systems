@@ -54,7 +54,7 @@ func main() {
 		return
 	}
 
-	node := chord.InitNode(address.String(), *port, *successorLimit, *identifier, *stabilizationTime, *fixFingerTime, *checkPredTime)
+	node := chord.InitNode(address, *port, *successorLimit, *identifier, *stabilizationTime, *fixFingerTime, *checkPredTime)
 	if joinAddress != nil && *joinPort != -1 {
 		node.Join(fmt.Sprintf("%s:%d", joinAddress.String(), *joinPort))
 	} else {

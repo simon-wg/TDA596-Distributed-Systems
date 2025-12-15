@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"math/big"
+	"net"
 	"net/http"
 	"net/rpc"
 	"os"
@@ -139,15 +140,15 @@ func (n *Node) startRpcServer() {
 	go http.Serve(l, nil)
 }
 
-func InitNode(address string, port int, successorLimit int, identifier string, stabilizationTime int, fixFingerTime int, checkPredTime int) *Node {
+func InitNode(address net.IP, port int, successorLimit int, identifier string, stabilizationTime int, fixFingerTime int, checkPredTime int) *Node {
 	n := &Node{
 		mu:                &sync.RWMutex{},
 		successorLimit:    successorLimit,
 		stabilizationTime: stabilizationTime,
 		fixFingerTime:     fixFingerTime,
 		checkPredTime:     checkPredTime,
-		address:           fmt.Sprintf("%s:%d", address, port),
-		id:                Hash(fmt.Sprintf("%s:%d", address, port)),
+		address:           fmt.Sprintf("%s:%d", address.String(), port),
+		id:                Hash(fmt.Sprintf("%s:%d", address.String(), port)),
 		fingerTable:       make([]string, Sha1BitSize),
 		successors:        make([]string, successorLimit),
 	}

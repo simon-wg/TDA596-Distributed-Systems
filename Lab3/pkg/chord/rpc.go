@@ -19,7 +19,7 @@ func CallAlive(address string) bool {
 	resp := &struct{}{}
 	err := CallCommand(address, "Alive", req, resp)
 	if err != nil {
-		slog.Error("node is not alive", "address", address, "error", err)
+		slog.Warn("node is not alive", "address", address, "error", err)
 		return false
 	}
 	return true
