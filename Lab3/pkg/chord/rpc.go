@@ -2,6 +2,7 @@ package chord
 
 import (
 	"fmt"
+	"log/slog"
 	"math/big"
 	"net/rpc"
 )
@@ -11,7 +12,7 @@ func CallAlive(address string) bool {
 	resp := &struct{}{}
 	err := CallCommand(address, "Alive", req, resp)
 	if err != nil {
-		fmt.Printf("Node at %s is not alive: %v\n", address, err)
+		slog.Error("Node is not alive", "address", address, "error", err)
 		return false
 	}
 	return true
@@ -22,7 +23,7 @@ func CallFindSuccessor(address string, id *big.Int) string {
 	resp := &FindSuccessorReply{}
 	err := CallCommand(address, "FindSuccessor", req, resp)
 	if err != nil {
-		fmt.Printf("Error finding successor: %v\n", err)
+		slog.Error("Error finding successor", "error", err)
 		return ""
 	}
 	return resp.Successor
@@ -33,7 +34,7 @@ func CallNotify(address string, nodeAddress string) {
 	resp := &NotifyReply{}
 	err := CallCommand(address, "Notify", req, resp)
 	if err != nil {
-		fmt.Printf("Error notifying node: %v\n", err)
+		slog.Error("Error notifying node", "error", err)
 	}
 }
 
@@ -42,7 +43,7 @@ func CallGetPredecessor(address string) string {
 	resp := &GetPredecessorReply{}
 	err := CallCommand(address, "GetPredecessor", req, resp)
 	if err != nil {
-		fmt.Printf("Error getting predecessor: %v\n", err)
+		slog.Error("Error getting predecessor", "error", err)
 		return ""
 	}
 	return resp.Predecessor
@@ -53,10 +54,32 @@ func CallGetSuccessors(address string) []string {
 	resp := &GetSuccessorsReply{}
 	err := CallCommand(address, "GetSuccessors", req, resp)
 	if err != nil {
-		fmt.Printf("Error getting successors: %v\n", err)
+		slog.Error("Error getting successors", "error", err)
 		return []string{}
 	}
 	return resp.Successors
+}
+
+func CallPut(address string, key string, value string) bool {
+	req := &PutArgs{Key: key, Value: value}
+	resp := &PutReply{}
+	err := CallCommand(address, "Put", req, resp)
+	if err != nil {
+		slog.Error("Error putting data", "error", err)
+		return false
+	}
+	return resp.Success
+}
+
+func CallGet(address string, key string) (string, bool) {
+	req := &GetArgs{Key: key}
+	resp := &GetReply{}
+	err := CallCommand(address, "Get", req, resp)
+	if err != nil {
+		slog.Error("Error getting data", "error", err)
+		return "", false
+	}
+	return resp.Value, resp.Found
 }
 
 func CallCommand(address string, method string, req interface{}, resp interface{}) error {
@@ -83,7 +106,7 @@ func (n *Node) FindSuccessor(args *FindSuccessorArgs, reply *FindSuccessorReply)
 		if successor == "" {
 			continue
 		}
-		successorIdInclusive := new(big.Int).Add(HashAddress(successor), big.NewInt(1))
+		successorIdInclusive := new(big.Int).Add(Hash(successor), big.NewInt(1))
 		if IsBetween(&id, n.Id, successorIdInclusive) {
 			reply.Successor = successor
 			n.mu.RUnlock()
@@ -107,10 +130,10 @@ func (n *Node) FindSuccessor(args *FindSuccessorArgs, reply *FindSuccessorReply)
 
 func (n *Node) Notify(args *NotifyArgs, reply *NotifyReply) error {
 	address := args.Address
-	id := HashAddress(address)
+	id := Hash(address)
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	predId := HashAddress(n.Predecessor)
+	predId := Hash(n.Predecessor)
 	if n.Predecessor == "" || IsBetween(id, predId, n.Id) {
 		n.Predecessor = address
 	}
@@ -124,6 +147,23 @@ func (n *Node) GetPredecessor(args *GetPredecessorArgs, reply *GetPredecessorRep
 
 func (n *Node) GetSuccessors(args *GetSuccessorsArgs, reply *GetSuccessorsReply) error {
 	reply.Successors = n.ReadSuccessors()
+	return nil
+}
+
+func (n *Node) Put(args *PutArgs, reply *PutReply) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.Data[args.Key] = args.Value
+	reply.Success = true
+	return nil
+}
+
+func (n *Node) Get(args *GetArgs, reply *GetReply) error {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	val, ok := n.Data[args.Key]
+	reply.Value = val
+	reply.Found = ok
 	return nil
 }
 
@@ -147,4 +187,20 @@ type GetPredecessorReply struct {
 type GetSuccessorsArgs struct{}
 type GetSuccessorsReply struct {
 	Successors []string
+}
+
+type PutArgs struct {
+	Key   string
+	Value string
+}
+type PutReply struct {
+	Success bool
+}
+
+type GetArgs struct {
+	Key string
+}
+type GetReply struct {
+	Value string
+	Found bool
 }

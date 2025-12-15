@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"raft/pkg/chord"
 	"strings"
@@ -55,10 +56,8 @@ func main() {
 	node := chord.StartNode(*address, *port, *successorLimit, *identifier, *stabilizationTime, *fixFingerTime, *checkPredTime)
 	if joinAddress != nil && *joinPort != -1 {
 		node.Join(fmt.Sprintf("%s:%d", *joinAddress, *joinPort))
-	}
 
-	// TODO: Start goroutines for stabilize, fix fingers, check predecessor
-	// TODO: Start RPC server to listen for incoming requests
+	}
 
 	reader := bufio.NewReader(os.Stdin)
 	for {
@@ -73,63 +72,42 @@ func main() {
 
 		switch cmd {
 		case "l":
-			if len(slices) < 2 {
-				fmt.Println("Please provide a file name to lookup")
-				continue
-			}
-			fileName := slices[1]
-			lookup(fileName)
-			continue
+			fallthrough
 		case "Lookup":
 			if len(slices) < 2 {
 				fmt.Println("Please provide a file name to lookup")
-				continue
 			}
 			fileName := slices[1]
-			lookup(fileName)
-			continue
-
-		case "sf":
-			if len(slices) < 2 {
-				fmt.Println("Please provide a file path to store")
-				continue
+			content, found, ownerAddress, ownerId, ipPort := node.Lookup(fileName)
+			if found {
+				fmt.Printf("Found file '%s' on node %s (ID: %s)\n", fileName, ownerAddress, ownerId)
+				fmt.Printf("IP Address: %s\n", strings.Split(ipPort, ":")[0])
+				fmt.Printf("Port: %s\n", strings.Split(ipPort, ":")[1])
+				fmt.Printf("Content:\n%s\n", content)
+			} else {
+				fmt.Printf("File '%s' not found.\n", fileName)
+				if ownerAddress != "" {
+					fmt.Printf("Owner node: %s (ID: %s)\n", ownerAddress, ownerId)
+				}
 			}
-			filePath := slices[1]
-			storeFile(filePath)
-			continue
+		case "s":
+			fallthrough
 		case "StoreFile":
 			if len(slices) < 2 {
 				fmt.Println("Please provide a file path to store")
-				continue
 			}
 			filePath := slices[1]
-			storeFile(filePath)
-			continue
-
-		case "ps":
-			node.PrintState()
-			continue
+			node.StoreFile(filePath)
+		case "p":
+			fallthrough
 		case "PrintState":
 			node.PrintState()
-			continue
-
 		default:
-			fmt.Println("Unknown command")
-			continue
+			slog.Warn("Unknown command")
 		}
+		continue
 	}
 }
-
-func lookup(fileName string) {
-	fmt.Println("Lookup called")
-
-}
-
-func storeFile(filePath string) {
-	fmt.Println("StoreFile called")
-
-}
-
 func isHexString(s string) bool {
 	for _, c := range s {
 		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {

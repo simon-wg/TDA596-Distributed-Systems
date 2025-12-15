@@ -3,10 +3,13 @@ package chord
 import (
 	"crypto/sha1"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"net"
 	"net/http"
 	"net/rpc"
+	"os"
+	"path/filepath"
 	"slices"
 	"sync"
 	"time"
@@ -28,6 +31,54 @@ type Node struct {
 	Predecessor    string
 	Successors     []string
 	FingerTable    []string
+	Data           map[string]string
+}
+
+func (n *Node) Lookup(fileName string) (string, bool, string, string, string) {
+	slog.Debug("Looking up file", "node", n.Address, "file", fileName)
+	fileHash := Hash(fileName)
+	ownerAddress := CallFindSuccessor(n.Address, fileHash)
+
+	if ownerAddress == "" {
+		slog.Error("Could not find successor for file", "node", n.Address, "file", fileName, "hash", fileHash.Text(16))
+		return "", false, "", "", ""
+	}
+
+	content, found := CallGet(ownerAddress, fileName)
+	if !found {
+		slog.Debug("File not found on owner node", "node", n.Address, "file", fileName, "owner", ownerAddress)
+		return "", false, ownerAddress, Hash(ownerAddress).Text(16), ""
+	}
+
+	slog.Debug("File found on node", "node", n.Address, "file", fileName, "owner", ownerAddress, "ownerID", Hash(ownerAddress).Text(16))
+	return content, true, ownerAddress, Hash(ownerAddress).Text(16), ownerAddress
+}
+
+func (n *Node) StoreFile(filePath string) bool {
+	fileContentBytes, err := os.ReadFile(filePath)
+	if err != nil {
+		slog.Error("Error reading file", "node", n.Address, "path", filePath, "error", err)
+		return false
+	}
+	fileName := filepath.Base(filePath)
+	fileContent := string(fileContentBytes)
+
+	slog.Info("Storing file", "node", n.Address, "file", fileName)
+	fileHash := Hash(fileName)
+	ownerAddress := CallFindSuccessor(n.Address, fileHash)
+
+	if ownerAddress == "" {
+		slog.Error("Could not find successor for file", "node", n.Address, "file", fileName, "hash", fileHash.Text(16))
+		return false
+	}
+
+	success := CallPut(ownerAddress, fileName, fileContent)
+	if success {
+		slog.Info("Successfully stored file", "node", n.Address, "file", fileName, "owner", ownerAddress, "ownerID", Hash(ownerAddress).Text(16))
+	} else {
+		slog.Error("Failed to store file on node", "node", n.Address, "file", fileName, "owner", ownerAddress)
+	}
+	return success
 }
 
 func (n *Node) startRpcServer() {
@@ -35,14 +86,13 @@ func (n *Node) startRpcServer() {
 	rpc.HandleHTTP()
 	l, err := net.Listen("tcp", n.Address)
 	if err != nil {
-		fmt.Printf("Error starting RPC server: %v\n", err)
+		slog.Error("Error starting RPC server", "error", err)
 		return
 	}
-	fmt.Printf("RPC server listening on %s\n", n.Address)
+	slog.Info("RPC server listening", "address", n.Address)
 	go http.Serve(l, nil)
 }
 
-// Plz
 func StartNode(address string, port int, successorLimit int, identifier string, stabilizationTime int, fixFingerTime int, checkPredTime int) *Node {
 	n := &Node{
 		mu:             &sync.RWMutex{},
@@ -69,17 +119,18 @@ func (n *Node) create() {
 	for i := 1; i < len(n.Successors); i++ {
 		n.Successors[i] = ""
 	}
-	n.Id = HashAddress(n.Address)
+	n.Data = make(map[string]string)
+	n.Id = Hash(n.Address)
 }
 
 func (n *Node) Join(other string) {
-	fmt.Printf("Joining node at %s\n", other)
+	slog.Info("Joining node", "address", other)
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	successor := CallFindSuccessor(other, n.Id)
 	if successor == "" {
-		fmt.Println("Failed to find successor, cannot join the network")
-		fmt.Println("Node is now its own successor")
+		slog.Warn("Failed to find successor, cannot join the network")
+		slog.Info("Node is now its own successor")
 		return
 	}
 
@@ -90,7 +141,7 @@ func (n *Node) ClosestPrecedingNode(id *big.Int) string {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
 	for i := Sha1BitSize - 1; i >= 0; i-- {
-		fingerId := HashAddress(n.FingerTable[i])
+		fingerId := Hash(n.FingerTable[i])
 		if IsBetween(fingerId, n.Id, id) {
 			return n.FingerTable[i]
 		}
@@ -110,7 +161,7 @@ func (n *Node) fixFingers() {
 	n.mu.Unlock()
 	err := n.FindSuccessor(args, reply)
 	if err != nil {
-		fmt.Printf("Error fixing finger %d: %v\n", next, err)
+		slog.Error("Error fixing finger", "finger", next, "error", err)
 		return
 	}
 	n.mu.Lock()
@@ -137,9 +188,9 @@ func (n *Node) stabilize() {
 		x = CallGetPredecessor(successor)
 	}
 	// Check if x is between n and n's successor
-	successorId := HashAddress(successor)
+	successorId := Hash(successor)
 	if x != "" {
-		xId := HashAddress(x)
+		xId := Hash(x)
 		nId := n.ReadID()
 		if IsBetween(xId, nId, successorId) {
 			n.mu.Lock()
@@ -195,7 +246,7 @@ func (n *Node) startBackgroundRoutines(stabilizationTime int, fixFingerTime int,
 	}()
 }
 
-func HashAddress(address string) *big.Int {
+func Hash(address string) *big.Int {
 	// SHA1 is considered insecure for cryptographic purposes, but is sufficient for generating node IDs in a Chord DHT.
 	digest := sha1.Sum([]byte(address))
 	id := new(big.Int).SetBytes(digest[:])
@@ -271,13 +322,13 @@ func (n *Node) PrintState() {
 	fmt.Printf("Node Address: %s\n", n.Address)
 	fmt.Println("=====")
 	fmt.Printf("Predecessor: %s\n", n.Predecessor)
-	fmt.Printf("Predecessor ID: %s\n", HashAddress(n.Predecessor))
+	fmt.Printf("Predecessor ID: %s\n", Hash(n.Predecessor))
 	fmt.Println("=====")
 
 	// Successors info
 	for i, successor := range n.Successors {
 		fmt.Printf("Successor %d: %s\n", i, successor)
-		fmt.Printf("Successor %d ID: %s\n", i, HashAddress(successor))
+		fmt.Printf("Successor %d ID: %s\n", i, Hash(successor))
 		fmt.Println("-----")
 	}
 
@@ -289,7 +340,7 @@ func (n *Node) PrintState() {
 			continue
 		}
 		fmt.Printf("Finger %d: %s\n", i, finger)
-		fmt.Printf("Finger %d ID: %s\n", i, HashAddress(finger))
+		fmt.Printf("Finger %d ID: %s\n", i, Hash(finger))
 		fmt.Println("-----")
 	}
 }
