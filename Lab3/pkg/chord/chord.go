@@ -37,6 +37,7 @@ type Node struct {
 	fixFingerTime     int
 	checkPredTime     int
 	address           string
+	port              int
 	id                *big.Int
 	predecessor       string
 	successors        []string
@@ -142,7 +143,7 @@ func (n *Node) startRpcServer() {
 	}
 
 	// Listen using tls.Listen instead of net.Listen
-	l, err := tls.Listen("tcp", n.address, tlsConfig)
+	l, err := tls.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", n.port), tlsConfig)
 	if err != nil {
 		slog.Error("Error starting RPC server", "error", err)
 		return
@@ -163,6 +164,7 @@ func InitNode(address net.IP, port int, successorLimit int, identifier string, s
 		fixFingerTime:     fixFingerTime,
 		checkPredTime:     checkPredTime,
 		address:           fmt.Sprintf("%s:%d", address.String(), port),
+		port:              port,
 		id:                Hash(fmt.Sprintf("%s:%d", address.String(), port)),
 		fingerTable:       make([]string, Sha1BitSize),
 		successors:        make([]string, successorLimit),
