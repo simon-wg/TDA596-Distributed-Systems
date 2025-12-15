@@ -1,8 +1,14 @@
 package chord
 
 import (
+	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"crypto/sha1"
+	"crypto/sha256"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/big"
 	"net"
@@ -32,9 +38,10 @@ type Node struct {
 	Successors     []string
 	FingerTable    []string
 	Data           map[string]string
+	AuthHash       *[32]byte
 }
 
-func (n *Node) Lookup(fileName string) (string, bool, string, string, string) {
+func (n *Node) Lookup(fileName string, password *string) (string, bool, string, string, string) {
 	slog.Debug("Looking up file", "node", n.Address, "file", fileName)
 	fileHash := Hash(fileName)
 	ownerAddress := CallFindSuccessor(n.Address, fileHash)
@@ -49,6 +56,23 @@ func (n *Node) Lookup(fileName string) (string, bool, string, string, string) {
 		slog.Debug("File not found on owner node", "node", n.Address, "file", fileName, "owner", ownerAddress)
 		return "", false, ownerAddress, Hash(ownerAddress).Text(16), ""
 	}
+	if password == nil && n.AuthHash != nil {
+		decryptedContent, err := decryptFileContent([]byte(content), *n.AuthHash)
+		if err != nil {
+			slog.Error("Error decrypting file content", "node", n.Address, "file", fileName, "owner", ownerAddress, "error", err)
+			return "", false, ownerAddress, Hash(ownerAddress).Text(16), ""
+		}
+		content = string(decryptedContent)
+	}
+	if password != nil {
+		key := hashPassword(password)
+		decryptedContent, err := decryptFileContent([]byte(content), *key)
+		if err != nil {
+			slog.Error("Error decrypting file content", "node", n.Address, "file", fileName, "owner", ownerAddress, "error", err)
+			return "", false, ownerAddress, Hash(ownerAddress).Text(16), ""
+		}
+		content = string(decryptedContent)
+	}
 
 	slog.Debug("File found on node", "node", n.Address, "file", fileName, "owner", ownerAddress, "ownerID", Hash(ownerAddress).Text(16))
 	return content, true, ownerAddress, Hash(ownerAddress).Text(16), ownerAddress
@@ -61,6 +85,16 @@ func (n *Node) StoreFile(filePath string) bool {
 		return false
 	}
 	fileName := filepath.Base(filePath)
+	if n.AuthHash != nil {
+		// We interpreted the assignment as all nodes which know the password can read the files.
+		encryptedContent, err := encryptFileContent(fileContentBytes, *n.AuthHash)
+		slog.Info("Encrypting file before storage", "node", n.Address, "file", fileName)
+		if err != nil {
+			slog.Error("Error encrypting file content", "node", n.Address, "file", fileName, "error", err)
+			return false
+		}
+		fileContentBytes = encryptedContent
+	}
 	fileContent := string(fileContentBytes)
 
 	slog.Info("Storing file", "node", n.Address, "file", fileName)
@@ -93,13 +127,14 @@ func (n *Node) startRpcServer() {
 	go http.Serve(l, nil)
 }
 
-func StartNode(address string, port int, successorLimit int, identifier string, stabilizationTime int, fixFingerTime int, checkPredTime int) *Node {
+func StartNode(address string, port int, successorLimit int, identifier string, stabilizationTime int, fixFingerTime int, checkPredTime int, password *string) *Node {
 	n := &Node{
 		mu:             &sync.RWMutex{},
 		SuccessorLimit: successorLimit,
 		Address:        fmt.Sprintf("%s:%d", address, port),
 		FingerTable:    make([]string, Sha1BitSize),
 		Successors:     make([]string, successorLimit),
+		AuthHash:       hashPassword(password),
 	}
 	n.create()
 	if identifier != "" {
@@ -343,4 +378,79 @@ func (n *Node) PrintState() {
 		fmt.Printf("Finger %d ID: %s\n", i, Hash(finger))
 		fmt.Println("-----")
 	}
+
+	// Stored data info
+	fmt.Println("Stored Files:")
+	for key := range n.Data {
+		fmt.Println(key)
+	}
+	fmt.Println("=====")
+}
+
+func hashPassword(password *string) *[32]byte {
+	if password == nil {
+		return nil
+	}
+	sum := sha256.Sum256([]byte(*password))
+	return &sum
+}
+
+func decryptFileContent(content []byte, password [32]byte) ([]byte, error) {
+	decryptedContent, err := decryptAES(content, password)
+	if err != nil {
+		return nil, err
+	}
+	return decryptedContent, nil
+}
+
+func encryptFileContent(content []byte, password [32]byte) ([]byte, error) {
+	encryptedContent, err := encryptAES(content, password)
+	if err != nil {
+		return nil, err
+	}
+	return encryptedContent, nil
+}
+
+func encryptAES(plaintext []byte, key [32]byte) ([]byte, error) {
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		return nil, err
+	}
+
+	padding := aes.BlockSize - len(plaintext)%aes.BlockSize
+	padtext := append(plaintext, bytes.Repeat([]byte{byte(padding)}, padding)...)
+
+	ciphertext := make([]byte, aes.BlockSize+len(padtext))
+	iv := ciphertext[:aes.BlockSize]
+	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
+		return nil, err
+	}
+
+	mode := cipher.NewCBCEncrypter(block, iv)
+	mode.CryptBlocks(ciphertext[aes.BlockSize:], padtext)
+
+	return ciphertext, nil
+}
+
+func decryptAES(ciphertext []byte, key [32]byte) ([]byte, error) {
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		return nil, err
+	}
+
+	if len(ciphertext) < aes.BlockSize {
+		return nil, fmt.Errorf("ciphertext too short")
+	}
+
+	iv := ciphertext[:aes.BlockSize]
+	ciphertext = ciphertext[aes.BlockSize:]
+
+	mode := cipher.NewCBCDecrypter(block, iv)
+	mode.CryptBlocks(ciphertext, ciphertext)
+
+	padding := int(ciphertext[len(ciphertext)-1])
+	if len(ciphertext) < padding {
+		return nil, fmt.Errorf("invalid padding size")
+	}
+	return ciphertext[:len(ciphertext)-padding], nil
 }
