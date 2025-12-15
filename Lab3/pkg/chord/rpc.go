@@ -1,18 +1,25 @@
 package chord
 
 import (
+	"bufio"
+	"crypto/tls"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/big"
+	"net/http"
 	"net/rpc"
 )
 
 func CallAlive(address string) bool {
+	if address == "" {
+		return false
+	}
 	req := &struct{}{}
 	resp := &struct{}{}
 	err := CallCommand(address, "Alive", req, resp)
 	if err != nil {
-		slog.Error("Node is not alive", "address", address, "error", err)
+		slog.Error("node is not alive", "address", address, "error", err)
 		return false
 	}
 	return true
@@ -31,28 +38,25 @@ func CallFindSuccessor(address string, id *big.Int) string {
 
 func CallNotify(address string, nodeAddress string) {
 	req := &NotifyArgs{Address: nodeAddress}
-	resp := &NotifyReply{}
-	err := CallCommand(address, "Notify", req, resp)
+	err := CallCommand(address, "Notify", req, &struct{}{})
 	if err != nil {
-		slog.Error("Error notifying node", "error", err)
+		slog.Error("notifying node", "error", err)
 	}
 }
 
 func CallGetPredecessor(address string) string {
-	req := &GetPredecessorArgs{}
 	resp := &GetPredecessorReply{}
-	err := CallCommand(address, "GetPredecessor", req, resp)
+	err := CallCommand(address, "GetPredecessor", struct{}{}, resp)
 	if err != nil {
-		slog.Error("Error getting predecessor", "error", err)
+		slog.Error("getting predecessor", "error", err)
 		return ""
 	}
 	return resp.Predecessor
 }
 
 func CallGetSuccessors(address string) []string {
-	req := &GetSuccessorsArgs{}
 	resp := &GetSuccessorsReply{}
-	err := CallCommand(address, "GetSuccessors", req, resp)
+	err := CallCommand(address, "GetSuccessors", struct{}{}, resp)
 	if err != nil {
 		slog.Error("Error getting successors", "error", err)
 		return []string{}
@@ -82,12 +86,39 @@ func CallGet(address string, key string) (string, bool) {
 	return resp.Value, resp.Found
 }
 
+func CallGetAll(address string) map[string]string {
+	res := &GetAllReply{}
+	err := CallCommand(address, "GetAll", struct{}{}, res)
+	if err != nil {
+		slog.Error("Error getting all data", "error", err)
+		return nil
+	}
+	return res.Data
+}
+
 func CallCommand(address string, method string, req interface{}, resp interface{}) error {
-	client, err := rpc.DialHTTP("tcp", address)
+	conn, err := tls.Dial("tcp", address, &tls.Config{
+		InsecureSkipVerify: true,
+	})
 	if err != nil {
 		return fmt.Errorf("error dialing %s: %v", address, err)
 	}
+	defer conn.Close()
+
+	// Manually perform the HTTP CONNECT handshake
+	io.WriteString(conn, "CONNECT "+rpc.DefaultRPCPath+" HTTP/1.0\n\n")
+
+	response, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: "CONNECT"})
+	if err != nil {
+		return fmt.Errorf("error reading RPC handshake response: %v", err)
+	}
+	if response.Status != "200 Connected to Go RPC" && response.StatusCode != 200 {
+		return fmt.Errorf("unexpected RPC handshake response: %s", response.Status)
+	}
+
+	client := rpc.NewClient(conn)
 	defer client.Close()
+
 	err = client.Call("Node."+method, req, resp)
 	if err != nil {
 		return fmt.Errorf("error calling %s on %s: %v", method, address, err)
@@ -128,7 +159,7 @@ func (n *Node) FindSuccessor(args *FindSuccessorArgs, reply *FindSuccessorReply)
 	return nil
 }
 
-func (n *Node) Notify(args *NotifyArgs, reply *NotifyReply) error {
+func (n *Node) Notify(args *NotifyArgs, reply *struct{}) error {
 	address := args.Address
 	id := Hash(address)
 	n.mu.Lock()
@@ -140,12 +171,12 @@ func (n *Node) Notify(args *NotifyArgs, reply *NotifyReply) error {
 	return nil
 }
 
-func (n *Node) GetPredecessor(args *GetPredecessorArgs, reply *GetPredecessorReply) error {
+func (n *Node) GetPredecessor(args struct{}, reply *GetPredecessorReply) error {
 	reply.Predecessor = n.ReadPredecessor()
 	return nil
 }
 
-func (n *Node) GetSuccessors(args *GetSuccessorsArgs, reply *GetSuccessorsReply) error {
+func (n *Node) GetSuccessors(args struct{}, reply *GetSuccessorsReply) error {
 	reply.Successors = n.ReadSuccessors()
 	return nil
 }
@@ -167,6 +198,20 @@ func (n *Node) Get(args *GetArgs, reply *GetReply) error {
 	return nil
 }
 
+func (n *Node) GetAll(args struct{}, reply *GetAllReply) error {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	reply.Data = make(map[string]string)
+	for k, v := range n.Data {
+		reply.Data[k] = v
+	}
+	return nil
+}
+
+type GetAllReply struct {
+	Data map[string]string
+}
+
 type FindSuccessorArgs struct {
 	Id big.Int
 }
@@ -177,14 +222,11 @@ type FindSuccessorReply struct {
 type NotifyArgs struct {
 	Address string
 }
-type NotifyReply struct{}
 
-type GetPredecessorArgs struct{}
 type GetPredecessorReply struct {
 	Predecessor string
 }
 
-type GetSuccessorsArgs struct{}
 type GetSuccessorsReply struct {
 	Successors []string
 }

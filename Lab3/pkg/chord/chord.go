@@ -7,11 +7,11 @@ import (
 	"crypto/rand"
 	"crypto/sha1"
 	"crypto/sha256"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
-	"net"
 	"net/http"
 	"net/rpc"
 	"os"
@@ -38,7 +38,7 @@ type Node struct {
 	Successors     []string
 	FingerTable    []string
 	Data           map[string]string
-	AuthHash       *[32]byte
+	Backup         map[string]string
 }
 
 func (n *Node) Lookup(fileName string, password *string) (string, bool, string, string, string) {
@@ -56,14 +56,6 @@ func (n *Node) Lookup(fileName string, password *string) (string, bool, string, 
 		slog.Debug("File not found on owner node", "node", n.Address, "file", fileName, "owner", ownerAddress)
 		return "", false, ownerAddress, Hash(ownerAddress).Text(16), ""
 	}
-	if password == nil && n.AuthHash != nil {
-		decryptedContent, err := decryptFileContent([]byte(content), *n.AuthHash)
-		if err != nil {
-			slog.Error("Error decrypting file content", "node", n.Address, "file", fileName, "owner", ownerAddress, "error", err)
-			return "", false, ownerAddress, Hash(ownerAddress).Text(16), ""
-		}
-		content = string(decryptedContent)
-	}
 	if password != nil {
 		key := hashPassword(password)
 		decryptedContent, err := decryptFileContent([]byte(content), *key)
@@ -78,16 +70,16 @@ func (n *Node) Lookup(fileName string, password *string) (string, bool, string, 
 	return content, true, ownerAddress, Hash(ownerAddress).Text(16), ownerAddress
 }
 
-func (n *Node) StoreFile(filePath string) bool {
+func (n *Node) StoreFile(filePath string, password *string) bool {
 	fileContentBytes, err := os.ReadFile(filePath)
 	if err != nil {
 		slog.Error("Error reading file", "node", n.Address, "path", filePath, "error", err)
 		return false
 	}
 	fileName := filepath.Base(filePath)
-	if n.AuthHash != nil {
-		// We interpreted the assignment as all nodes which know the password can read the files.
-		encryptedContent, err := encryptFileContent(fileContentBytes, *n.AuthHash)
+	if password != nil {
+		key := hashPassword(password)
+		encryptedContent, err := encryptFileContent(fileContentBytes, *key)
 		slog.Info("Encrypting file before storage", "node", n.Address, "file", fileName)
 		if err != nil {
 			slog.Error("Error encrypting file content", "node", n.Address, "file", fileName, "error", err)
@@ -118,23 +110,39 @@ func (n *Node) StoreFile(filePath string) bool {
 func (n *Node) startRpcServer() {
 	rpc.Register(n)
 	rpc.HandleHTTP()
-	l, err := net.Listen("tcp", n.Address)
+
+	// Generate the in-memory self-signed certificate
+	cert, err := generateSelfSignedCert()
+	if err != nil {
+		slog.Error("Error generating self-signed certificate", "error", err)
+		return
+	}
+
+	// Configure TLS with the cert
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+	}
+
+	// Listen using tls.Listen instead of net.Listen
+	l, err := tls.Listen("tcp", n.Address, tlsConfig)
 	if err != nil {
 		slog.Error("Error starting RPC server", "error", err)
 		return
 	}
-	slog.Info("RPC server listening", "address", n.Address)
+
+	slog.Info("RPC server listening (Secure)", "address", n.Address)
+
+	// http.Serve will automatically handle HTTPS because the listener 'l' is a TLS listener
 	go http.Serve(l, nil)
 }
 
-func StartNode(address string, port int, successorLimit int, identifier string, stabilizationTime int, fixFingerTime int, checkPredTime int, password *string) *Node {
+func StartNode(address string, port int, successorLimit int, identifier string, stabilizationTime int, fixFingerTime int, checkPredTime int) *Node {
 	n := &Node{
 		mu:             &sync.RWMutex{},
 		SuccessorLimit: successorLimit,
 		Address:        fmt.Sprintf("%s:%d", address, port),
 		FingerTable:    make([]string, Sha1BitSize),
 		Successors:     make([]string, successorLimit),
-		AuthHash:       hashPassword(password),
 	}
 	n.create()
 	if identifier != "" {
@@ -176,6 +184,9 @@ func (n *Node) ClosestPrecedingNode(id *big.Int) string {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
 	for i := Sha1BitSize - 1; i >= 0; i-- {
+		if n.FingerTable[i] == "" {
+			continue
+		}
 		fingerId := Hash(n.FingerTable[i])
 		if IsBetween(fingerId, n.Id, id) {
 			return n.FingerTable[i]
@@ -216,6 +227,7 @@ func (n *Node) stabilize() {
 		}
 	}
 	n.UpdateSuccessors(CallGetSuccessors(successor), successor)
+	n.GetDataFromSuccessor()
 	// Get successor's predecessor
 	if successor == n.Address {
 		x = n.ReadPredecessor()
@@ -234,13 +246,13 @@ func (n *Node) stabilize() {
 			n.mu.Unlock()
 		}
 	}
+
 	// Notify successor
 	if successor == n.Address {
 		args := &NotifyArgs{
 			Address: n.Address,
 		}
-		reply := &NotifyReply{}
-		n.Notify(args, reply)
+		n.Notify(args, &struct{}{})
 	} else {
 		CallNotify(n.Successors[0], n.Address)
 	}
@@ -252,10 +264,15 @@ func (n *Node) checkPredecessor() {
 	if pred != "" && pred != n.Address {
 		if !CallAlive(pred) {
 			n.mu.Lock()
+			for key := range n.Backup {
+				n.Data[key] = n.Backup[key]
+			}
 			if n.Predecessor == pred {
 				n.Predecessor = ""
 			}
 			n.mu.Unlock()
+		} else {
+			n.Replicate()
 		}
 	}
 }
@@ -296,6 +313,49 @@ func IsBetween(id, start, end *big.Int) bool {
 	}
 }
 
+func (n *Node) Replicate() {
+	pred := n.ReadPredecessor()
+	if pred == "" {
+		return
+	}
+	data := CallGetAll(pred)
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.Backup = data
+	n.pruneData()
+}
+
+func (n *Node) pruneData() {
+	pred := n.Predecessor
+	predId := Hash(pred)
+	for key := range n.Data {
+		keyHash := Hash(key)
+		if !IsBetween(keyHash, predId, n.Id) {
+			delete(n.Data, key)
+		}
+	}
+}
+
+func (n *Node) GetDataFromSuccessor() {
+	successor := n.ReadSuccessor()
+	if successor == n.Address {
+		return
+	}
+	// In reality we would want to only get data that this node is now responsible for
+	// For simplicity, we get all data from the successor and filter locally
+	data := CallGetAll(successor)
+	pred := n.ReadPredecessor()
+	predId := Hash(pred)
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for key, value := range data {
+		keyHash := Hash(key)
+		if IsBetween(keyHash, predId, n.Id) {
+			n.Data[key] = value
+		}
+	}
+}
+
 func (n *Node) PopSuccessor() string {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -310,6 +370,9 @@ func (n *Node) UpdateSuccessors(ns []string, s string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.Successors[0] = s
+	if len(ns) != len(n.Successors) {
+		return
+	}
 	if slices.Compare(n.Successors[1:], ns[:len(ns)-1]) == 0 {
 		return
 	}
@@ -385,6 +448,13 @@ func (n *Node) PrintState() {
 		fmt.Println(key)
 	}
 	fmt.Println("=====")
+
+	// Mirrored data info
+	fmt.Println("Mirrored Files:")
+	for key := range n.Backup {
+		fmt.Println(key)
+	}
+	fmt.Println("=====")
 }
 
 func hashPassword(password *string) *[32]byte {
@@ -449,8 +519,5 @@ func decryptAES(ciphertext []byte, key [32]byte) ([]byte, error) {
 	mode.CryptBlocks(ciphertext, ciphertext)
 
 	padding := int(ciphertext[len(ciphertext)-1])
-	if len(ciphertext) < padding {
-		return nil, fmt.Errorf("invalid padding size")
-	}
 	return ciphertext[:len(ciphertext)-padding], nil
 }

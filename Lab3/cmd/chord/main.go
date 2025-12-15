@@ -20,7 +20,6 @@ func main() {
 	checkPredTime := flag.Int("tcp", -1, "Time in milliseconds between invocation of check predecess")
 	successorLimit := flag.Int("r", -1, "Number of successors maintained by chord client")
 	identifier := flag.String("i", "", "The identifier assigned to Chord client. Overwrites ID computed by SHA1 sum of IP and Port.")
-	password := flag.String("e", "", "Password for encrypting stored files (optional)")
 
 	flag.Parse()
 
@@ -54,7 +53,7 @@ func main() {
 		return
 	}
 
-	node := chord.StartNode(*address, *port, *successorLimit, *identifier, *stabilizationTime, *fixFingerTime, *checkPredTime, password)
+	node := chord.StartNode(*address, *port, *successorLimit, *identifier, *stabilizationTime, *fixFingerTime, *checkPredTime)
 	if joinAddress != nil && *joinPort != -1 {
 		node.Join(fmt.Sprintf("%s:%d", *joinAddress, *joinPort))
 
@@ -104,7 +103,11 @@ func main() {
 				fmt.Println("Please provide a file path to store")
 			}
 			filePath := slices[1]
-			node.StoreFile(filePath)
+			if len(slices) > 2 {
+				node.StoreFile(filePath, &slices[2])
+			} else {
+				node.StoreFile(filePath, nil)
+			}
 		case "p":
 			fallthrough
 		case "PrintState":

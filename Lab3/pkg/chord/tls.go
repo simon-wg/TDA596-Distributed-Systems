@@ -22,7 +22,7 @@ func generateSelfSignedCert() (tls.Certificate, error) {
 			Organization: []string{"Chord Node"},
 		},
 		NotBefore: time.Now(),
-		NotAfter:  time.Now().Add(24 * time.Hour * 365), // Valid for 1 year
+		NotAfter:  time.Now().Add(24 * time.Hour * 365),
 
 		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
