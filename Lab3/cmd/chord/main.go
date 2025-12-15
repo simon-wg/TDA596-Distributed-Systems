@@ -26,13 +26,22 @@ func main() {
 
 	flag.Parse()
 
+	if address == nil {
+		fmt.Println("Please provide an address using -a flag")
+		return
+	}
 	if *port == -1 {
 		fmt.Println("Please provide a port using -p flag")
 		return
 	}
-
-	// TODO: Add validation for join port and join address
-
+	if joinAddress != nil && *joinPort == -1 {
+		fmt.Println("Please provide a join port using -jp flag")
+		return
+	}
+	if joinAddress == nil && *joinPort != -1 {
+		fmt.Println("Please provide a join address using -ja flag")
+		return
+	}
 	if *stabilizationTime == -1 || *stabilizationTime < 1 || *stabilizationTime > 60000 {
 		fmt.Println("Please specify stabilization time in the range [1,60000] using the --ts flag")
 		return
@@ -54,6 +63,7 @@ func main() {
 		return
 	}
 
+	// Joins a chord or creates a new one depending on the flags provided
 	node := chord.InitNode(address, *port, *successorLimit, *identifier, *stabilizationTime, *fixFingerTime, *checkPredTime)
 	if joinAddress != nil && *joinPort != -1 {
 		node.Join(fmt.Sprintf("%s:%d", joinAddress.String(), *joinPort))
@@ -61,6 +71,7 @@ func main() {
 		node.Create()
 	}
 
+	// Continously reads commands from stdin
 	reader := bufio.NewReader(os.Stdin)
 	for {
 		input, _ := reader.ReadString('\n')
@@ -120,6 +131,8 @@ func main() {
 		continue
 	}
 }
+
+// Helper function to check if a string is a valid hex string
 func isHexString(s string) bool {
 	for _, c := range s {
 		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {

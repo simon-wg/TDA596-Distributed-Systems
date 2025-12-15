@@ -45,21 +45,26 @@ type Node struct {
 	backup            map[string]string
 }
 
+// Lookup looks up a file in the chord and returns its content if found.
 func (n *Node) Lookup(fileName string, password *string) (string, bool, string, string, string) {
 	slog.Debug("Looking up file", "node", n.address, "file", fileName)
 	fileHash := Hash(fileName)
 	ownerAddress := CallFindSuccessor(n.address, fileHash)
 
+	// If no owner found, return not found
 	if ownerAddress == "" {
 		slog.Error("Could not find successor for file", "node", n.address, "file", fileName, "hash", fileHash.Text(16))
 		return "", false, "", "", ""
 	}
 
+	// Try to get the file from the owner node
 	content, found := CallGet(ownerAddress, fileName)
 	if !found {
 		slog.Debug("File not found on owner node", "node", n.address, "file", fileName, "owner", ownerAddress)
 		return "", false, ownerAddress, Hash(ownerAddress).Text(16), ""
 	}
+
+	// If password is provided, decrypt the content
 	if password != nil {
 		key := hashPassword(password)
 		decryptedContent, err := decryptFileContent([]byte(content), *key)
@@ -74,12 +79,17 @@ func (n *Node) Lookup(fileName string, password *string) (string, bool, string, 
 	return content, true, ownerAddress, Hash(ownerAddress).Text(16), ownerAddress
 }
 
+// StoreFile stores a file on a node in the chord, optionally encrypting it with a password.
 func (n *Node) StoreFile(filePath string, password *string) bool {
+
+	// Read file content
 	fileContentBytes, err := os.ReadFile(filePath)
 	if err != nil {
 		slog.Error("Error reading file", "node", n.address, "path", filePath, "error", err)
 		return false
 	}
+
+	// Encrypt file content if password is provided
 	fileName := filepath.Base(filePath)
 	if password != nil {
 		key := hashPassword(password)
@@ -93,15 +103,18 @@ func (n *Node) StoreFile(filePath string, password *string) bool {
 	}
 	fileContent := string(fileContentBytes)
 
+	// Find the owner node for the file
 	slog.Info("Storing file", "node", n.address, "file", fileName)
 	fileHash := Hash(fileName)
 	ownerAddress := CallFindSuccessor(n.address, fileHash)
 
+	// If no owner found, return failure
 	if ownerAddress == "" {
 		slog.Error("Could not find successor for file", "node", n.address, "file", fileName, "hash", fileHash.Text(16))
 		return false
 	}
 
+	// Store the file on the owner node
 	success := CallPut(ownerAddress, fileName, fileContent)
 	if success {
 		slog.Info("Successfully stored file", "node", n.address, "file", fileName, "owner", ownerAddress, "ownerID", Hash(ownerAddress).Text(16))
@@ -111,6 +124,7 @@ func (n *Node) StoreFile(filePath string, password *string) bool {
 	return success
 }
 
+// startRpcServer starts the RPC server for the node with TLS encryption.
 func (n *Node) startRpcServer() {
 	rpc.Register(n)
 	rpc.HandleHTTP()
@@ -140,6 +154,7 @@ func (n *Node) startRpcServer() {
 	go http.Serve(l, nil)
 }
 
+// Initializes a new Node with the given parameters.
 func InitNode(address net.IP, port int, successorLimit int, identifier string, stabilizationTime int, fixFingerTime int, checkPredTime int) *Node {
 	n := &Node{
 		mu:                &sync.RWMutex{},
@@ -160,6 +175,7 @@ func InitNode(address net.IP, port int, successorLimit int, identifier string, s
 	return n
 }
 
+// Creates a new chord with this node as the only member.
 func (n *Node) Create() {
 	n.mu.Lock()
 	n.predecessor = ""
@@ -172,6 +188,7 @@ func (n *Node) Create() {
 	n.startBackgroundRoutines()
 }
 
+// Joins an existing chord network via the given node address.
 func (n *Node) Join(other string) {
 	n.mu.Lock()
 	n.predecessor = ""
@@ -190,6 +207,7 @@ func (n *Node) Join(other string) {
 	n.startBackgroundRoutines()
 }
 
+// Returns the closest preceding node for the given ID from the finger table.
 func (n *Node) ClosestPrecedingNode(id *big.Int) string {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
@@ -205,6 +223,7 @@ func (n *Node) ClosestPrecedingNode(id *big.Int) string {
 	return n.address
 }
 
+// Fixes the next finger in the finger table.
 func (n *Node) fixFingers() {
 	n.mu.Lock()
 	next = (next + 1) % Sha1BitSize
@@ -225,6 +244,7 @@ func (n *Node) fixFingers() {
 	n.fingerTable[next] = reply.Successor
 }
 
+// Stabilizes the node by checking and updating its successor and notifying it.
 func (n *Node) stabilize() {
 	var x string
 	successor := n.ReadSuccessor()
@@ -267,6 +287,7 @@ func (n *Node) stabilize() {
 	}
 }
 
+// Checks if the predecessor is alive and updates data replication if necessary.
 func (n *Node) checkPredecessor() {
 	pred := n.ReadPredecessor()
 
@@ -286,6 +307,7 @@ func (n *Node) checkPredecessor() {
 	}
 }
 
+// Starts the background routines for stabilization, fixing fingers, and checking predecessor.
 func (n *Node) startBackgroundRoutines() {
 	n.mu.RLock()
 	stabilizationTime := n.stabilizationTime
@@ -312,6 +334,7 @@ func (n *Node) startBackgroundRoutines() {
 	}()
 }
 
+// Hashes the given address using SHA1 and returns a big.Int representation.
 func Hash(address string) *big.Int {
 	// SHA1 is considered insecure for cryptographic purposes, but is sufficient for generating node IDs in a Chord DHT.
 	digest := sha1.Sum([]byte(address))
@@ -319,6 +342,7 @@ func Hash(address string) *big.Int {
 	return id
 }
 
+// Checks if id is between start and end in the identifier circle.
 func IsBetween(id, start, end *big.Int) bool {
 	if start.Cmp(end) < 0 {
 		return id.Cmp(start) > 0 && id.Cmp(end) < 0
@@ -327,8 +351,8 @@ func IsBetween(id, start, end *big.Int) bool {
 	}
 }
 
+// Replicates data to the predecessor node.
 func (n *Node) Replicate() {
-	// TODO: We still don't get the data from our successor when we first join the network
 	pred := n.ReadPredecessor()
 	if pred == "" {
 		return
@@ -343,6 +367,7 @@ func (n *Node) Replicate() {
 	n.pruneData()
 }
 
+// Prunes data if it no longer belongs to this node and transfers it to the predecessor.
 func (n *Node) pruneData() {
 	pred := n.predecessor
 	if pred == "" {
@@ -373,6 +398,7 @@ func (n *Node) pruneData() {
 	}
 }
 
+// Pops the first successor from the successor list and shifts the others.
 func (n *Node) PopSuccessor() string {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -383,6 +409,7 @@ func (n *Node) PopSuccessor() string {
 	return n.successors[0]
 }
 
+// Updates the successor list with the given successors and new successor.
 func (n *Node) UpdateSuccessors(ns []string, s string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -398,12 +425,14 @@ func (n *Node) UpdateSuccessors(ns []string, s string) {
 	}
 }
 
+// Reads the predecessor address.
 func (n *Node) ReadPredecessor() string {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
 	return n.predecessor
 }
 
+// Reads the first successor address.
 func (n *Node) ReadSuccessor() string {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
@@ -413,6 +442,7 @@ func (n *Node) ReadSuccessor() string {
 	return n.successors[0]
 }
 
+// Reads the list of successor addresses.
 func (n *Node) ReadSuccessors() []string {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
@@ -421,6 +451,7 @@ func (n *Node) ReadSuccessors() []string {
 	return successors
 }
 
+// Reads the node ID.
 func (n *Node) ReadID() *big.Int {
 	n.mu.RLock()
 	defer n.mu.RUnlock()

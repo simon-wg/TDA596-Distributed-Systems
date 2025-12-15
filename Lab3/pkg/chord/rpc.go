@@ -11,6 +11,7 @@ import (
 	"net/rpc"
 )
 
+// CallAlive checks if a node at the given address is alive.
 func CallAlive(address string) bool {
 	if address == "" {
 		return false
@@ -25,6 +26,7 @@ func CallAlive(address string) bool {
 	return true
 }
 
+// CallFindSuccessor calls the FindSuccessor RPC on the node at the given address.
 func CallFindSuccessor(address string, id *big.Int) string {
 	req := &FindSuccessorArgs{Id: *id}
 	resp := &FindSuccessorReply{}
@@ -35,6 +37,10 @@ func CallFindSuccessor(address string, id *big.Int) string {
 	}
 	return resp.Successor
 }
+
+//
+// Call functions for other RPC methods
+//
 
 func CallNotify(address string, nodeAddress string) {
 	req := &NotifyArgs{Address: nodeAddress}
@@ -107,6 +113,7 @@ func CallTransferData(address string, data map[string]string) bool {
 	return resp.Success
 }
 
+// CallCommand is a helper function to call an RPC method on a node at the given address.
 func CallCommand(address string, method string, req interface{}, resp interface{}) error {
 	conn, err := tls.Dial("tcp", address, &tls.Config{
 		InsecureSkipVerify: true,
@@ -127,6 +134,7 @@ func CallCommand(address string, method string, req interface{}, resp interface{
 		return fmt.Errorf("unexpected RPC handshake response: %s", response.Status)
 	}
 
+	// Creates new RPC client
 	client := rpc.NewClient(conn)
 	defer client.Close()
 
@@ -137,13 +145,21 @@ func CallCommand(address string, method string, req interface{}, resp interface{
 	return nil
 }
 
+//
+// RPC method implementations
+//
+
+// Alive checks if the node is alive.
 func (n *Node) Alive(args *struct{}, reply *struct{}) error {
 	return nil
 }
 
+// FindSuccessor finds the successor of the given ID.
 func (n *Node) FindSuccessor(args *FindSuccessorArgs, reply *FindSuccessorReply) error {
 	id := args.Id
 	n.mu.RLock()
+
+	// Check if the ID is between this node and its first successor
 	for _, successor := range n.successors {
 		if successor == "" {
 			continue
@@ -157,19 +173,23 @@ func (n *Node) FindSuccessor(args *FindSuccessorArgs, reply *FindSuccessorReply)
 	}
 	n.mu.RUnlock()
 	closestPrecedingNode := n.ClosestPrecedingNode(&id)
-	// TODO: Double check that this is correct for larger rings
 	n.mu.RLock()
+
+	// If the closest preceding node is this node, return the first successor
 	if closestPrecedingNode == n.address {
 		reply.Successor = n.successors[0]
 		n.mu.RUnlock()
 		return nil
 	}
+
+	// Release the read lock before making the RPC call
 	n.mu.RUnlock()
 	successor := CallFindSuccessor(closestPrecedingNode, &id)
 	reply.Successor = successor
 	return nil
 }
 
+// Notify notifies the node about a potential predecessor.
 func (n *Node) Notify(args *NotifyArgs, reply *struct{}) error {
 	address := args.Address
 	id := Hash(address)
@@ -182,16 +202,19 @@ func (n *Node) Notify(args *NotifyArgs, reply *struct{}) error {
 	return nil
 }
 
+// GetPredecessor returns the predecessor of the node.
 func (n *Node) GetPredecessor(args struct{}, reply *GetPredecessorReply) error {
 	reply.Predecessor = n.ReadPredecessor()
 	return nil
 }
 
+// GetSuccessors returns the successors of the node.
 func (n *Node) GetSuccessors(args struct{}, reply *GetSuccessorsReply) error {
 	reply.Successors = n.ReadSuccessors()
 	return nil
 }
 
+// Put stores a key-value pair in the node's data store.
 func (n *Node) Put(args *PutArgs, reply *PutReply) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -200,6 +223,7 @@ func (n *Node) Put(args *PutArgs, reply *PutReply) error {
 	return nil
 }
 
+// Get retrieves a value by key from the node's data store.
 func (n *Node) Get(args *GetArgs, reply *GetReply) error {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
@@ -209,6 +233,7 @@ func (n *Node) Get(args *GetArgs, reply *GetReply) error {
 	return nil
 }
 
+// GetAll retrieves all key-value pairs from the node's data store.
 func (n *Node) GetAll(args struct{}, reply *GetAllReply) error {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
@@ -219,6 +244,7 @@ func (n *Node) GetAll(args struct{}, reply *GetAllReply) error {
 	return nil
 }
 
+// TransferData transfers key-value pairs to the node's data store.
 func (n *Node) TransferData(args *TransferDataArgs, reply *TransferDataReply) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -228,6 +254,10 @@ func (n *Node) TransferData(args *TransferDataArgs, reply *TransferDataReply) er
 	reply.Success = true
 	return nil
 }
+
+//
+// // RPC argument and reply types
+//
 
 type GetAllReply struct {
 	Data map[string]string
