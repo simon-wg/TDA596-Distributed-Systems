@@ -30,79 +30,82 @@ var (
 )
 
 type Node struct {
-	mu             *sync.RWMutex
-	SuccessorLimit int
-	Address        string
-	Id             *big.Int
-	Predecessor    string
-	Successors     []string
-	FingerTable    []string
-	Data           map[string]string
-	Backup         map[string]string
+	mu                *sync.RWMutex
+	successorLimit    int
+	stabilizationTime int
+	fixFingerTime     int
+	checkPredTime     int
+	address           string
+	id                *big.Int
+	predecessor       string
+	successors        []string
+	fingerTable       []string
+	data              map[string]string
+	backup            map[string]string
 }
 
 func (n *Node) Lookup(fileName string, password *string) (string, bool, string, string, string) {
-	slog.Debug("Looking up file", "node", n.Address, "file", fileName)
+	slog.Debug("Looking up file", "node", n.address, "file", fileName)
 	fileHash := Hash(fileName)
-	ownerAddress := CallFindSuccessor(n.Address, fileHash)
+	ownerAddress := CallFindSuccessor(n.address, fileHash)
 
 	if ownerAddress == "" {
-		slog.Error("Could not find successor for file", "node", n.Address, "file", fileName, "hash", fileHash.Text(16))
+		slog.Error("Could not find successor for file", "node", n.address, "file", fileName, "hash", fileHash.Text(16))
 		return "", false, "", "", ""
 	}
 
 	content, found := CallGet(ownerAddress, fileName)
 	if !found {
-		slog.Debug("File not found on owner node", "node", n.Address, "file", fileName, "owner", ownerAddress)
+		slog.Debug("File not found on owner node", "node", n.address, "file", fileName, "owner", ownerAddress)
 		return "", false, ownerAddress, Hash(ownerAddress).Text(16), ""
 	}
 	if password != nil {
 		key := hashPassword(password)
 		decryptedContent, err := decryptFileContent([]byte(content), *key)
 		if err != nil {
-			slog.Error("Error decrypting file content", "node", n.Address, "file", fileName, "owner", ownerAddress, "error", err)
+			slog.Error("Error decrypting file content", "node", n.address, "file", fileName, "owner", ownerAddress, "error", err)
 			return "", false, ownerAddress, Hash(ownerAddress).Text(16), ""
 		}
 		content = string(decryptedContent)
 	}
 
-	slog.Debug("File found on node", "node", n.Address, "file", fileName, "owner", ownerAddress, "ownerID", Hash(ownerAddress).Text(16))
+	slog.Debug("File found on node", "node", n.address, "file", fileName, "owner", ownerAddress, "ownerID", Hash(ownerAddress).Text(16))
 	return content, true, ownerAddress, Hash(ownerAddress).Text(16), ownerAddress
 }
 
 func (n *Node) StoreFile(filePath string, password *string) bool {
 	fileContentBytes, err := os.ReadFile(filePath)
 	if err != nil {
-		slog.Error("Error reading file", "node", n.Address, "path", filePath, "error", err)
+		slog.Error("Error reading file", "node", n.address, "path", filePath, "error", err)
 		return false
 	}
 	fileName := filepath.Base(filePath)
 	if password != nil {
 		key := hashPassword(password)
 		encryptedContent, err := encryptFileContent(fileContentBytes, *key)
-		slog.Info("Encrypting file before storage", "node", n.Address, "file", fileName)
+		slog.Info("Encrypting file before storage", "node", n.address, "file", fileName)
 		if err != nil {
-			slog.Error("Error encrypting file content", "node", n.Address, "file", fileName, "error", err)
+			slog.Error("Error encrypting file content", "node", n.address, "file", fileName, "error", err)
 			return false
 		}
 		fileContentBytes = encryptedContent
 	}
 	fileContent := string(fileContentBytes)
 
-	slog.Info("Storing file", "node", n.Address, "file", fileName)
+	slog.Info("Storing file", "node", n.address, "file", fileName)
 	fileHash := Hash(fileName)
-	ownerAddress := CallFindSuccessor(n.Address, fileHash)
+	ownerAddress := CallFindSuccessor(n.address, fileHash)
 
 	if ownerAddress == "" {
-		slog.Error("Could not find successor for file", "node", n.Address, "file", fileName, "hash", fileHash.Text(16))
+		slog.Error("Could not find successor for file", "node", n.address, "file", fileName, "hash", fileHash.Text(16))
 		return false
 	}
 
 	success := CallPut(ownerAddress, fileName, fileContent)
 	if success {
-		slog.Info("Successfully stored file", "node", n.Address, "file", fileName, "owner", ownerAddress, "ownerID", Hash(ownerAddress).Text(16))
+		slog.Info("Successfully stored file", "node", n.address, "file", fileName, "owner", ownerAddress, "ownerID", Hash(ownerAddress).Text(16))
 	} else {
-		slog.Error("Failed to store file on node", "node", n.Address, "file", fileName, "owner", ownerAddress)
+		slog.Error("Failed to store file on node", "node", n.address, "file", fileName, "owner", ownerAddress)
 	}
 	return success
 }
@@ -124,81 +127,87 @@ func (n *Node) startRpcServer() {
 	}
 
 	// Listen using tls.Listen instead of net.Listen
-	l, err := tls.Listen("tcp", n.Address, tlsConfig)
+	l, err := tls.Listen("tcp", n.address, tlsConfig)
 	if err != nil {
 		slog.Error("Error starting RPC server", "error", err)
 		return
 	}
 
-	slog.Info("RPC server listening (Secure)", "address", n.Address)
+	slog.Info("RPC server listening (Secure)", "address", n.address)
 
 	// http.Serve will automatically handle HTTPS because the listener 'l' is a TLS listener
 	go http.Serve(l, nil)
 }
 
-func StartNode(address string, port int, successorLimit int, identifier string, stabilizationTime int, fixFingerTime int, checkPredTime int) *Node {
+func InitNode(address string, port int, successorLimit int, identifier string, stabilizationTime int, fixFingerTime int, checkPredTime int) *Node {
 	n := &Node{
-		mu:             &sync.RWMutex{},
-		SuccessorLimit: successorLimit,
-		Address:        fmt.Sprintf("%s:%d", address, port),
-		FingerTable:    make([]string, Sha1BitSize),
-		Successors:     make([]string, successorLimit),
+		mu:                &sync.RWMutex{},
+		successorLimit:    successorLimit,
+		stabilizationTime: stabilizationTime,
+		fixFingerTime:     fixFingerTime,
+		checkPredTime:     checkPredTime,
+		address:           fmt.Sprintf("%s:%d", address, port),
+		id:                Hash(fmt.Sprintf("%s:%d", address, port)),
+		fingerTable:       make([]string, Sha1BitSize),
+		successors:        make([]string, successorLimit),
 	}
-	n.create()
 	if identifier != "" {
-		n.Id = new(big.Int)
-		n.Id.SetString(identifier, 16)
+		n.id = new(big.Int)
+		n.id.SetString(identifier, 16)
 	}
 	n.startRpcServer()
-	n.startBackgroundRoutines(stabilizationTime, fixFingerTime, checkPredTime)
 	return n
 }
 
-func (n *Node) create() {
+func (n *Node) Create() {
 	n.mu.Lock()
-	defer n.mu.Unlock()
-	n.Predecessor = ""
-	n.Successors[0] = n.Address
-	for i := 1; i < len(n.Successors); i++ {
-		n.Successors[i] = ""
+	n.predecessor = ""
+	n.successors[0] = n.address
+	for i := 1; i < len(n.successors); i++ {
+		n.successors[i] = ""
 	}
-	n.Data = make(map[string]string)
-	n.Id = Hash(n.Address)
+	n.data = make(map[string]string)
+	n.mu.Unlock()
+	n.startBackgroundRoutines()
 }
 
 func (n *Node) Join(other string) {
-	slog.Info("Joining node", "address", other)
 	n.mu.Lock()
-	defer n.mu.Unlock()
-	successor := CallFindSuccessor(other, n.Id)
+	n.predecessor = ""
+	n.data = make(map[string]string)
+	nId := n.id
+	n.mu.Unlock()
+	successor := CallFindSuccessor(other, nId)
 	if successor == "" {
 		slog.Warn("Failed to find successor, cannot join the network")
 		slog.Info("Node is now its own successor")
 		return
 	}
-
-	n.Successors[0] = successor
+	n.mu.Lock()
+	n.successors[0] = successor
+	n.mu.Unlock()
+	n.startBackgroundRoutines()
 }
 
 func (n *Node) ClosestPrecedingNode(id *big.Int) string {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
 	for i := Sha1BitSize - 1; i >= 0; i-- {
-		if n.FingerTable[i] == "" {
+		if n.fingerTable[i] == "" {
 			continue
 		}
-		fingerId := Hash(n.FingerTable[i])
-		if IsBetween(fingerId, n.Id, id) {
-			return n.FingerTable[i]
+		fingerId := Hash(n.fingerTable[i])
+		if IsBetween(fingerId, n.id, id) {
+			return n.fingerTable[i]
 		}
 	}
-	return n.Address
+	return n.address
 }
 
 func (n *Node) fixFingers() {
 	n.mu.Lock()
 	next = (next + 1) % Sha1BitSize
-	id := n.Id
+	id := n.id
 	nextId := new(big.Int).Add(id, new(big.Int).Lsh(big.NewInt(1), uint(next)))
 	args := &FindSuccessorArgs{
 		Id: *nextId,
@@ -212,7 +221,7 @@ func (n *Node) fixFingers() {
 	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	n.FingerTable[next] = reply.Successor
+	n.fingerTable[next] = reply.Successor
 }
 
 func (n *Node) stabilize() {
@@ -220,7 +229,7 @@ func (n *Node) stabilize() {
 	successor := n.ReadSuccessor()
 
 	for {
-		if successor != n.Address && !CallAlive(successor) {
+		if successor != n.address && !CallAlive(successor) {
 			successor = n.PopSuccessor()
 		} else {
 			break
@@ -229,7 +238,7 @@ func (n *Node) stabilize() {
 	n.UpdateSuccessors(CallGetSuccessors(successor), successor)
 	n.GetDataFromSuccessor()
 	// Get successor's predecessor
-	if successor == n.Address {
+	if successor == n.address {
 		x = n.ReadPredecessor()
 	} else {
 		x = CallGetPredecessor(successor)
@@ -241,34 +250,34 @@ func (n *Node) stabilize() {
 		nId := n.ReadID()
 		if IsBetween(xId, nId, successorId) {
 			n.mu.Lock()
-			n.Successors[0] = x
+			n.successors[0] = x
 			successor = x
 			n.mu.Unlock()
 		}
 	}
 
 	// Notify successor
-	if successor == n.Address {
+	if successor == n.address {
 		args := &NotifyArgs{
-			Address: n.Address,
+			Address: n.address,
 		}
 		n.Notify(args, &struct{}{})
 	} else {
-		CallNotify(n.Successors[0], n.Address)
+		CallNotify(n.successors[0], n.address)
 	}
 }
 
 func (n *Node) checkPredecessor() {
 	pred := n.ReadPredecessor()
 
-	if pred != "" && pred != n.Address {
+	if pred != "" && pred != n.address {
 		if !CallAlive(pred) {
 			n.mu.Lock()
-			for key := range n.Backup {
-				n.Data[key] = n.Backup[key]
+			for key := range n.backup {
+				n.data[key] = n.backup[key]
 			}
-			if n.Predecessor == pred {
-				n.Predecessor = ""
+			if n.predecessor == pred {
+				n.predecessor = ""
 			}
 			n.mu.Unlock()
 		} else {
@@ -277,7 +286,12 @@ func (n *Node) checkPredecessor() {
 	}
 }
 
-func (n *Node) startBackgroundRoutines(stabilizationTime int, fixFingerTime int, checkPredTime int) {
+func (n *Node) startBackgroundRoutines() {
+	n.mu.RLock()
+	stabilizationTime := n.stabilizationTime
+	fixFingerTime := n.fixFingerTime
+	checkPredTime := n.checkPredTime
+	n.mu.RUnlock()
 	go func() {
 		for {
 			n.stabilize()
@@ -314,6 +328,7 @@ func IsBetween(id, start, end *big.Int) bool {
 }
 
 func (n *Node) Replicate() {
+	// TODO: We still don't get the data from our successor when we first join the network
 	pred := n.ReadPredecessor()
 	if pred == "" {
 		return
@@ -321,24 +336,27 @@ func (n *Node) Replicate() {
 	data := CallGetAll(pred)
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	n.Backup = data
+	if n.predecessor != pred {
+		return
+	}
+	n.backup = data
 	n.pruneData()
 }
 
 func (n *Node) pruneData() {
-	pred := n.Predecessor
+	pred := n.predecessor
 	predId := Hash(pred)
-	for key := range n.Data {
+	for key := range n.data {
 		keyHash := Hash(key)
-		if !IsBetween(keyHash, predId, n.Id) {
-			delete(n.Data, key)
+		if !IsBetween(keyHash, predId, n.id) {
+			delete(n.data, key)
 		}
 	}
 }
 
 func (n *Node) GetDataFromSuccessor() {
 	successor := n.ReadSuccessor()
-	if successor == n.Address {
+	if successor == n.address {
 		return
 	}
 	// In reality we would want to only get data that this node is now responsible for
@@ -350,8 +368,8 @@ func (n *Node) GetDataFromSuccessor() {
 	defer n.mu.Unlock()
 	for key, value := range data {
 		keyHash := Hash(key)
-		if IsBetween(keyHash, predId, n.Id) {
-			n.Data[key] = value
+		if IsBetween(keyHash, predId, n.id) {
+			n.data[key] = value
 		}
 	}
 }
@@ -359,55 +377,55 @@ func (n *Node) GetDataFromSuccessor() {
 func (n *Node) PopSuccessor() string {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	for i := 0; i < len(n.Successors)-1; i++ {
-		n.Successors[i] = n.Successors[i+1]
+	for i := 0; i < len(n.successors)-1; i++ {
+		n.successors[i] = n.successors[i+1]
 	}
-	n.Successors[len(n.Successors)-1] = ""
-	return n.Successors[0]
+	n.successors[len(n.successors)-1] = ""
+	return n.successors[0]
 }
 
 func (n *Node) UpdateSuccessors(ns []string, s string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	n.Successors[0] = s
-	if len(ns) != len(n.Successors) {
+	n.successors[0] = s
+	if len(ns) != len(n.successors) {
 		return
 	}
-	if slices.Compare(n.Successors[1:], ns[:len(ns)-1]) == 0 {
+	if slices.Compare(n.successors[1:], ns[:len(ns)-1]) == 0 {
 		return
 	}
-	for i := 0; i < len(ns)-1 && i+1 < len(n.Successors); i++ {
-		n.Successors[i+1] = ns[i]
+	for i := 0; i < len(ns)-1 && i+1 < len(n.successors); i++ {
+		n.successors[i+1] = ns[i]
 	}
 }
 
 func (n *Node) ReadPredecessor() string {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
-	return n.Predecessor
+	return n.predecessor
 }
 
 func (n *Node) ReadSuccessor() string {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
-	if len(n.Successors) == 0 {
+	if len(n.successors) == 0 {
 		return ""
 	}
-	return n.Successors[0]
+	return n.successors[0]
 }
 
 func (n *Node) ReadSuccessors() []string {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
-	successors := make([]string, len(n.Successors))
-	copy(successors, n.Successors)
+	successors := make([]string, len(n.successors))
+	copy(successors, n.successors)
 	return successors
 }
 
 func (n *Node) ReadID() *big.Int {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
-	return n.Id
+	return n.id
 }
 
 func (n *Node) PrintState() {
@@ -416,24 +434,24 @@ func (n *Node) PrintState() {
 
 	// Client info
 	fmt.Println("=====")
-	fmt.Printf("Node ID: %s\n", n.Id)
-	fmt.Printf("Node Address: %s\n", n.Address)
+	fmt.Printf("Node ID: %s\n", n.id)
+	fmt.Printf("Node Address: %s\n", n.address)
 	fmt.Println("=====")
-	fmt.Printf("Predecessor: %s\n", n.Predecessor)
-	fmt.Printf("Predecessor ID: %s\n", Hash(n.Predecessor))
+	fmt.Printf("Predecessor: %s\n", n.predecessor)
+	fmt.Printf("Predecessor ID: %s\n", Hash(n.predecessor))
 	fmt.Println("=====")
 
 	// Successors info
-	for i, successor := range n.Successors {
+	for i, successor := range n.successors {
 		fmt.Printf("Successor %d: %s\n", i, successor)
 		fmt.Printf("Successor %d ID: %s\n", i, Hash(successor))
 		fmt.Println("-----")
 	}
 
 	// Fingertable info
-	limit := min(len(n.FingerTable), 3)
+	limit := min(len(n.fingerTable), 3)
 	for i := range limit {
-		finger := n.FingerTable[i]
+		finger := n.fingerTable[i]
 		if finger == "" {
 			continue
 		}
@@ -444,14 +462,14 @@ func (n *Node) PrintState() {
 
 	// Stored data info
 	fmt.Println("Stored Files:")
-	for key := range n.Data {
+	for key := range n.data {
 		fmt.Println(key)
 	}
 	fmt.Println("=====")
 
 	// Mirrored data info
 	fmt.Println("Mirrored Files:")
-	for key := range n.Backup {
+	for key := range n.backup {
 		fmt.Println(key)
 	}
 	fmt.Println("=====")

@@ -53,10 +53,11 @@ func main() {
 		return
 	}
 
-	node := chord.StartNode(*address, *port, *successorLimit, *identifier, *stabilizationTime, *fixFingerTime, *checkPredTime)
+	node := chord.InitNode(*address, *port, *successorLimit, *identifier, *stabilizationTime, *fixFingerTime, *checkPredTime)
 	if joinAddress != nil && *joinPort != -1 {
 		node.Join(fmt.Sprintf("%s:%d", *joinAddress, *joinPort))
-
+	} else {
+		node.Create()
 	}
 
 	reader := bufio.NewReader(os.Stdin)

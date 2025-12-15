@@ -133,12 +133,12 @@ func (n *Node) Alive(args *struct{}, reply *struct{}) error {
 func (n *Node) FindSuccessor(args *FindSuccessorArgs, reply *FindSuccessorReply) error {
 	id := args.Id
 	n.mu.RLock()
-	for _, successor := range n.Successors {
+	for _, successor := range n.successors {
 		if successor == "" {
 			continue
 		}
 		successorIdInclusive := new(big.Int).Add(Hash(successor), big.NewInt(1))
-		if IsBetween(&id, n.Id, successorIdInclusive) {
+		if IsBetween(&id, n.id, successorIdInclusive) {
 			reply.Successor = successor
 			n.mu.RUnlock()
 			return nil
@@ -148,8 +148,8 @@ func (n *Node) FindSuccessor(args *FindSuccessorArgs, reply *FindSuccessorReply)
 	closestPrecedingNode := n.ClosestPrecedingNode(&id)
 	// TODO: Double check that this is correct for larger rings
 	n.mu.RLock()
-	if closestPrecedingNode == n.Address {
-		reply.Successor = n.Successors[0]
+	if closestPrecedingNode == n.address {
+		reply.Successor = n.successors[0]
 		n.mu.RUnlock()
 		return nil
 	}
@@ -164,9 +164,9 @@ func (n *Node) Notify(args *NotifyArgs, reply *struct{}) error {
 	id := Hash(address)
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	predId := Hash(n.Predecessor)
-	if n.Predecessor == "" || IsBetween(id, predId, n.Id) {
-		n.Predecessor = address
+	predId := Hash(n.predecessor)
+	if n.predecessor == "" || IsBetween(id, predId, n.id) {
+		n.predecessor = address
 	}
 	return nil
 }
@@ -184,7 +184,7 @@ func (n *Node) GetSuccessors(args struct{}, reply *GetSuccessorsReply) error {
 func (n *Node) Put(args *PutArgs, reply *PutReply) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	n.Data[args.Key] = args.Value
+	n.data[args.Key] = args.Value
 	reply.Success = true
 	return nil
 }
@@ -192,7 +192,7 @@ func (n *Node) Put(args *PutArgs, reply *PutReply) error {
 func (n *Node) Get(args *GetArgs, reply *GetReply) error {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
-	val, ok := n.Data[args.Key]
+	val, ok := n.data[args.Key]
 	reply.Value = val
 	reply.Found = ok
 	return nil
@@ -202,7 +202,7 @@ func (n *Node) GetAll(args struct{}, reply *GetAllReply) error {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
 	reply.Data = make(map[string]string)
-	for k, v := range n.Data {
+	for k, v := range n.data {
 		reply.Data[k] = v
 	}
 	return nil
