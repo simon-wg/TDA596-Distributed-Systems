@@ -5,15 +5,18 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"raft/pkg/chord"
 	"strings"
 )
 
 func main() {
-	address := flag.String("a", "", "Address to listen on")
+	var address net.IP
+	flag.TextVar(&address, "a", net.IP(nil), "Address to listen on")
 	port := flag.Int("p", -1, "Port to listen on")
-	joinAddress := flag.String("ja", "", "Address to join")
+	var joinAddress net.IP
+	flag.TextVar(&joinAddress, "ja", net.IP(nil), "Address to join")
 	joinPort := flag.Int("jp", -1, "Port to join")
 	stabilizationTime := flag.Int("ts", -1, "Time in milliseconds between invocation of stabilize")
 	fixFingerTime := flag.Int("tff", -1, "Time in milliseconds between invocations of fix fingers")
@@ -22,8 +25,6 @@ func main() {
 	identifier := flag.String("i", "", "The identifier assigned to Chord client. Overwrites ID computed by SHA1 sum of IP and Port.")
 
 	flag.Parse()
-
-	// TODO: Add validation for address
 
 	if *port == -1 {
 		fmt.Println("Please provide a port using -p flag")
@@ -53,9 +54,9 @@ func main() {
 		return
 	}
 
-	node := chord.InitNode(*address, *port, *successorLimit, *identifier, *stabilizationTime, *fixFingerTime, *checkPredTime)
+	node := chord.InitNode(address.String(), *port, *successorLimit, *identifier, *stabilizationTime, *fixFingerTime, *checkPredTime)
 	if joinAddress != nil && *joinPort != -1 {
-		node.Join(fmt.Sprintf("%s:%d", *joinAddress, *joinPort))
+		node.Join(fmt.Sprintf("%s:%d", joinAddress.String(), *joinPort))
 	} else {
 		node.Create()
 	}
