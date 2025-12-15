@@ -96,6 +96,17 @@ func CallGetAll(address string) map[string]string {
 	return res.Data
 }
 
+func CallTransferData(address string, data map[string]string) bool {
+	req := &TransferDataArgs{Data: data}
+	resp := &TransferDataReply{}
+	err := CallCommand(address, "TransferData", req, resp)
+	if err != nil {
+		slog.Error("Error transferring data", "error", err)
+		return false
+	}
+	return resp.Success
+}
+
 func CallCommand(address string, method string, req interface{}, resp interface{}) error {
 	conn, err := tls.Dial("tcp", address, &tls.Config{
 		InsecureSkipVerify: true,
@@ -208,8 +219,26 @@ func (n *Node) GetAll(args struct{}, reply *GetAllReply) error {
 	return nil
 }
 
+func (n *Node) TransferData(args *TransferDataArgs, reply *TransferDataReply) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for k, v := range args.Data {
+		n.data[k] = v
+	}
+	reply.Success = true
+	return nil
+}
+
 type GetAllReply struct {
 	Data map[string]string
+}
+
+type TransferDataArgs struct {
+	Data map[string]string
+}
+
+type TransferDataReply struct {
+	Success bool
 }
 
 type FindSuccessorArgs struct {

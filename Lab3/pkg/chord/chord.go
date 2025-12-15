@@ -236,7 +236,6 @@ func (n *Node) stabilize() {
 		}
 	}
 	n.UpdateSuccessors(CallGetSuccessors(successor), successor)
-	n.GetDataFromSuccessor()
 	// Get successor's predecessor
 	if successor == n.address {
 		x = n.ReadPredecessor()
@@ -345,31 +344,30 @@ func (n *Node) Replicate() {
 
 func (n *Node) pruneData() {
 	pred := n.predecessor
-	predId := Hash(pred)
-	for key := range n.data {
-		keyHash := Hash(key)
-		if !IsBetween(keyHash, predId, n.id) {
-			delete(n.data, key)
-		}
-	}
-}
-
-func (n *Node) GetDataFromSuccessor() {
-	successor := n.ReadSuccessor()
-	if successor == n.address {
+	if pred == "" {
 		return
 	}
-	// In reality we would want to only get data that this node is now responsible for
-	// For simplicity, we get all data from the successor and filter locally
-	data := CallGetAll(successor)
-	pred := n.ReadPredecessor()
 	predId := Hash(pred)
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	for key, value := range data {
+	nIdInclusive := new(big.Int).Add(n.id, big.NewInt(1))
+
+	toTransfer := make(map[string]string)
+	for key, value := range n.data {
 		keyHash := Hash(key)
-		if IsBetween(keyHash, predId, n.id) {
-			n.data[key] = value
+		if !IsBetween(keyHash, predId, nIdInclusive) {
+			toTransfer[key] = value
+		}
+	}
+
+	if len(toTransfer) > 0 {
+		n.mu.Unlock()
+		success := CallTransferData(pred, toTransfer)
+		n.mu.Lock()
+		if success {
+			for key := range toTransfer {
+				delete(n.data, key)
+			}
+		} else {
+			slog.Warn("Failed to transfer data to predecessor during prune", "pred", pred)
 		}
 	}
 }
