@@ -124,8 +124,11 @@ func CallCommand(address string, method string, req interface{}, resp interface{
 	defer conn.Close()
 
 	// Manually perform the HTTP CONNECT handshake
+	// This is basically what rpc.DialHTTP does, but we need a manual connection with tls so we have to do it ourselves
+	// DefaultRPCPath is "/_goRPC_"
 	io.WriteString(conn, "CONNECT "+rpc.DefaultRPCPath+" HTTP/1.0\n\n")
 
+	// Read the response from the server
 	response, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: "CONNECT"})
 	if err != nil {
 		return fmt.Errorf("error reading RPC handshake response: %v", err)
@@ -137,6 +140,7 @@ func CallCommand(address string, method string, req interface{}, resp interface{
 	// Creates new RPC client
 	client := rpc.NewClient(conn)
 	defer client.Close()
+	// From this point on we can use the client as if it was a normal RPC client
 
 	err = client.Call("Node."+method, req, resp)
 	if err != nil {

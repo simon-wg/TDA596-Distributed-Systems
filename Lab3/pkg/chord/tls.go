@@ -11,11 +11,14 @@ import (
 )
 
 func generateSelfSignedCert() (tls.Certificate, error) {
+	// Generate a key for the certificate
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return tls.Certificate{}, err
 	}
 
+	// Create a certificate template.
+	// This code was semi generated, since this course is not about PKI.
 	template := x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject: pkix.Name{
@@ -34,6 +37,7 @@ func generateSelfSignedCert() (tls.Certificate, error) {
 		return tls.Certificate{}, err
 	}
 
+	// We return the full tls certificate
 	return tls.Certificate{
 		Certificate: [][]byte{derBytes},
 		PrivateKey:  priv,
