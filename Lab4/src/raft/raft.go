@@ -286,10 +286,6 @@ func (rf *Raft) ticker() {
 	for rf.killed() == false {
 		// Your code here (2A)
 		// Check if a leader election should be started.
-		rf.mu.Lock()
-		temp := rf.lastHeartbeat
-		rf.mu.Unlock()
-
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
 		ms := 150 + (rand.Int63() % 150)
@@ -298,8 +294,8 @@ func (rf *Raft) ticker() {
 		isLeader := rf.state == leader
 		lastHeartbeat := rf.lastHeartbeat
 		rf.mu.Unlock()
-		if !isLeader && lastHeartbeat.Equal(temp) {
-			// Start election
+
+		if !isLeader && time.Since(lastHeartbeat) > time.Duration(ms)*time.Millisecond {
 			rf.mu.Lock()
 			rf.state = candidate
 			rf.mu.Unlock()
@@ -307,12 +303,14 @@ func (rf *Raft) ticker() {
 		}
 	}
 }
+
 func (rf *Raft) sendHeartbeat() {
-	for {
+	for !rf.killed() {
 		rf.mu.Lock()
 		isLeader := rf.state == leader
 		rf.mu.Unlock()
 		if !isLeader {
+			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 		rf.mu.Lock()
@@ -322,6 +320,9 @@ func (rf *Raft) sendHeartbeat() {
 		me := rf.me
 		rf.mu.Unlock()
 		for peer := range peers {
+			if peer == rf.me {
+				continue
+			}
 			args := &AppendEntriesArgs{
 				Term:     currentTerm,
 				LeaderId: me,
@@ -348,6 +349,9 @@ func (rf *Raft) startElection() {
 	votes := make(chan bool, peerCount-1)
 
 	for peer := range peerCount {
+		if peer == rf.me {
+			continue
+		}
 		args := &RequestVoteArgs{
 			Term:         currentTerm,
 			CandidateId:  me,
@@ -355,43 +359,41 @@ func (rf *Raft) startElection() {
 			LastLogTerm:  lastLogTerm,
 		}
 		reply := &RequestVoteReply{}
-		go func(peer int) {
-			ok := rf.sendRequestVote(peer, args, reply)
-			if ok {
+		go func() {
+			if rf.sendRequestVote(peer, args, reply) {
+				rf.mu.Lock()
+				if reply.Term > rf.currentTerm {
+					rf.currentTerm = reply.Term
+					rf.votedFor = -1
+					rf.state = follower
+				}
+				rf.mu.Unlock()
 				votes <- reply.VoteGranted
 			} else {
 				votes <- false
 			}
-		}(peer)
+		}()
 	}
 
 	// Sus, maybe deadlocks
-	go func(votes chan bool) {
-		grantedVotes := 0
+	go func() {
+		grantedVotes := 1
 
 		for i := 0; i < peerCount-1; i++ {
 			voteGranted := <-votes
 			if voteGranted {
 				grantedVotes++
 			}
-			if grantedVotes > peerCount/2.0 {
-				rf.mu.Lock()
+			rf.mu.Lock()
+			if rf.state == candidate && rf.currentTerm == currentTerm && grantedVotes > peerCount/2 {
 				rf.state = leader
 				rf.mu.Unlock()
-				for peer := range peerCount {
-					args := &AppendEntriesArgs{
-						Term:     currentTerm,
-						LeaderId: me,
-					}
-					reply := &AppendEntriesReply{}
-					go func(peer int) {
-						rf.sendAppendEntries(peer, args, reply)
-					}(peer)
-				}
+				rf.sendHeartbeat()
 				return
 			}
+			rf.mu.Unlock()
 		}
-	}(votes)
+	}()
 }
 
 type AppendEntriesArgs struct {
