@@ -359,12 +359,11 @@ func (rf *Raft) broadcastAppendEntries() {
 				Entries:      rf.log[rf.nextIndex[peer]:],
 			}
 			reply := &AppendEntriesReply{}
-			rf.nextIndex[peer] = len(rf.log)
 			go func(peer int) {
 				ok := rf.sendAppendEntries(peer, args, reply)
 				if !ok || !reply.Success {
 					rf.mu.Lock()
-					// This might cause race conditions later on, let's hope 200 ms is enough
+					// This might cause race conditions later on, let's hope 100 ms is enough
 					if rf.nextIndex[peer] > 1 {
 						rf.nextIndex[peer]--
 					}
@@ -372,15 +371,19 @@ func (rf *Raft) broadcastAppendEntries() {
 					return
 				}
 				rf.mu.Lock()
-				rf.matchIndex[peer] = rf.nextIndex[peer] - 1
+				rf.nextIndex[peer] = args.PrevLogIndex + len(args.Entries) + 1
+				rf.matchIndex[peer] = args.PrevLogIndex + len(args.Entries)
 				rf.mu.Unlock()
 			}(peer)
 		}
 		rf.mu.Unlock()
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
+// If there exists an N such that N > commitIndex, a majority
+// of matchIndex[i] ≥ N, and log[N].term == currentTerm:
+// set commitIndex = N (§5.3, §5.4).
 func (rf *Raft) checkCommit() {
 	for !rf.killed() {
 		rf.mu.Lock()
@@ -388,28 +391,28 @@ func (rf *Raft) checkCommit() {
 			rf.mu.Unlock()
 			return
 		}
+		count := 1
 		N := len(rf.log) - 1
-		for i := rf.commitIndex + 1; i <= N; i++ {
-			if rf.log[i].Term != rf.currentTerm {
+		for ; N > rf.commitIndex; N-- {
+			if rf.log[N].Term != rf.currentTerm {
 				continue
 			}
-			count := 1
 			for peer := range rf.peers {
 				if peer == rf.me {
 					continue
 				}
-				if rf.matchIndex[peer] >= i {
+				if rf.matchIndex[peer] >= N {
 					count++
 				}
 			}
 			if count > len(rf.peers)/2.0 {
-				N = i
+				rf.commitIndex = N
+				break
 			}
 		}
-		rf.commitIndex = N
 		rf.mu.Unlock()
 		// We can sleep for shorter time since this has no RPC calls
-		time.Sleep(150 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond)
 	}
 }
 
@@ -510,55 +513,38 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	term := args.Term
-	rf.lastHeartbeat = time.Now()
-	// Reply false if term < currentTerm
-	if term < rf.currentTerm {
-		reply.Term = rf.currentTerm
-		reply.Success = false
-		return
-	}
-	if term > rf.currentTerm {
-		rf.currentTerm = term
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
 		rf.votedFor = -1
 		rf.state = follower
 		rf.lastHeartbeat = time.Now()
 	}
+	reply.Success = true
+	reply.Term = rf.currentTerm
+	// Reply false if term < currentTerm
+	if args.Term < rf.currentTerm {
+		reply.Success = false
+	} else {
+		rf.lastHeartbeat = time.Now()
+		if args.LeaderCommit > rf.commitIndex {
+			rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
+		}
+	}
 	// Reply false if log doesn't contain an entry at prevLogIndex whose term matches prevLogTerm
-	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-		reply.Term = rf.currentTerm
+	if args.PrevLogIndex >= len(rf.log) {
 		reply.Success = false
 		return
 	}
-	// If empty appendEntries, return
-	if len(args.Entries) == 0 {
-		reply.Term = rf.currentTerm
-		reply.Success = true
-		return
+	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		reply.Success = false
 	}
 	// If an existing entry conflicts with a new one (same index
 	// but different terms), delete the existing entry and all that
 	// follow it
-	rf.log = rf.log[:args.PrevLogIndex+1]
+	// We instead just truncate the log at PrevLogIndex + 1 and append all new entries
+	rf.log = rf.log[:min(args.PrevLogIndex+1, len(rf.log))]
 	rf.log = append(rf.log, args.Entries...)
-	// lastLogIndex := -1
-	// for i, entry := range args.Entries {
-	// 	lastLogIndex = args.PrevLogIndex + 1 + i
-	// 	if lastLogIndex >= len(rf.log) {
-	// 		break
-	// 	}
-	// 	if rf.log[lastLogIndex].Term != entry.Term {
-	// 		rf.log = rf.log[:lastLogIndex]
-	// 	}
-	// }
 
-	// If leaderCommit > commitIndex, set commitIndex =
-	// min(leaderCommit, index of last new entry)
-	if args.LeaderCommit > rf.commitIndex {
-		rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
-	}
-
-	reply.Success = true
 	reply.Term = rf.currentTerm
 }
 
@@ -577,6 +563,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.applyCh = applyCh
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.currentTerm = 0
