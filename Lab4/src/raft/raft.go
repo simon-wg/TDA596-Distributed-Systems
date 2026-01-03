@@ -104,8 +104,7 @@ type LogEntry struct {
 
 // Helper function to reset election timer of this server
 func (rf *Raft) resetElectionTimer() {
-	ms := 150 + (rand.Int63() % 150)
-	rf.electionTimer.Reset(time.Duration(ms) * time.Millisecond)
+	rf.electionTimer.Reset(randomizedElectionTimeout())
 }
 
 func (rf *Raft) lastLog() (int, int) {
@@ -291,7 +290,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return -1, -1, false
 	}
 	rf.log = append(rf.log, LogEntry{Command: command, Term: rf.currentTerm})
-	// Trigger replication immediately unless there's already one ongoing
+	// Trigger replication immediately unless there's already one ongoing.
+	// This is how it's recommended in the Raft paper.
+	// Although since we're restricted to 100 ms heartbeat interval,
+	// this might break some tests.
 	select {
 	case rf.replicationTrigger <- true:
 	default:
@@ -663,9 +665,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState())
 
 	// initialize election timer
-	ms := 150 + (rand.Int63() % 150)
-	rf.electionTimer = time.AfterFunc(time.Duration(ms)*time.Millisecond, rf.handleElectionTimeout)
+	rf.electionTimer = time.AfterFunc(randomizedElectionTimeout(), rf.handleElectionTimeout)
 	go rf.applier()
 
 	return rf
+}
+
+func randomizedElectionTimeout() time.Duration {
+	// Since we're restricted to 100 ms heartbeat interval,
+	// we set election timeout to be in the range of [500ms, 1000ms].
+	// According to sources online the standard is 5x-10x of heartbeat interval.
+	ms := 500 + (rand.Int63() % 500)
+	return time.Duration(ms) * time.Millisecond
 }
