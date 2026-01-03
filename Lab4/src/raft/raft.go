@@ -71,8 +71,8 @@ type Raft struct {
 	cond *sync.Cond
 	// Channel to trigger log replication immediately
 	replicationTrigger chan bool
-	// Channel to reset election timer
-	electionTimerReset chan bool
+	// Election timer
+	electionTimer *time.Timer
 
 	// The server's current term
 	currentTerm int
@@ -104,10 +104,8 @@ type LogEntry struct {
 
 // Helper function to reset election timer of this server
 func (rf *Raft) resetElectionTimer() {
-	select {
-	case rf.electionTimerReset <- true:
-	default:
-	}
+	ms := 150 + (rand.Int63() % 150)
+	rf.electionTimer.Reset(time.Duration(ms) * time.Millisecond)
 }
 
 func (rf *Raft) lastLog() (int, int) {
@@ -347,81 +345,98 @@ func (rf *Raft) applier() {
 	}
 }
 
-func (rf *Raft) checkLeaderAlive() {
-	for !rf.killed() {
-		// Your code here (2A)
-		// Check if a leader election should be started.
-		// pause for a random amount of time between 150 and 300
-		// milliseconds.
-		ms := 150 + (rand.Int63() % 150)
-		timer := time.NewTimer(time.Duration(ms) * time.Millisecond)
-
-		select {
-		case <-rf.electionTimerReset:
-		case <-timer.C:
-			rf.mu.Lock()
-			if rf.state != leader {
-				rf.state = candidate
-				rf.mu.Unlock()
-				rf.startElection()
-				// Don't unlock here, startElection handles it or we unlocked above
-			} else {
-				rf.mu.Unlock()
-			}
-		}
-		timer.Stop()
+func (rf *Raft) handleElectionTimeout() {
+	if rf.killed() {
+		return
 	}
+
+	rf.mu.Lock()
+	if rf.state != leader {
+		rf.state = candidate
+		rf.mu.Unlock()
+		rf.startElection()
+	} else {
+		rf.mu.Unlock()
+	}
+
+	rf.resetElectionTimer()
 }
 
 func (rf *Raft) broadcastAppendEntries() {
 	for !rf.killed() {
-		rf.mu.Lock()
-		if rf.state != leader {
-			rf.mu.Unlock()
+		if !rf.replicateLogToAllPeers() {
 			return
 		}
-		peers := rf.peers
-		currentTerm := rf.currentTerm
-		me := rf.me
-		for peer := range peers {
-			if peer == rf.me {
-				continue
-			}
-			args := &AppendEntriesArgs{
-				Term:         currentTerm,
-				LeaderId:     me,
-				PrevLogIndex: rf.nextIndex[peer] - 1,
-				PrevLogTerm:  rf.log[rf.nextIndex[peer]-1].Term,
-				LeaderCommit: rf.commitIndex,
-				Entries:      rf.log[rf.nextIndex[peer]:],
-			}
-			reply := &AppendEntriesReply{}
-			go func(peer int) {
-				ok := rf.sendAppendEntries(peer, args, reply)
-				if !ok || !reply.Success {
-					rf.mu.Lock()
-					// This might cause race conditions later on, let's hope 100 ms is enough
-					if rf.nextIndex[peer] > 1 {
-						rf.nextIndex[peer]--
-					}
-					rf.mu.Unlock()
-					return
-				}
-				rf.mu.Lock()
-				rf.nextIndex[peer] = args.PrevLogIndex + len(args.Entries) + 1
-				rf.matchIndex[peer] = args.PrevLogIndex + len(args.Entries)
-				rf.advanceCommitIndex()
-				rf.mu.Unlock()
-			}(peer)
-		}
-		rf.mu.Unlock()
 
-		// Wait for the first of either a replication trigger or 100 ms
 		select {
 		case <-rf.replicationTrigger:
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
+}
+
+func (rf *Raft) replicateLogToAllPeers() bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.state != leader {
+		return false
+	}
+
+	for peer := range rf.peers {
+		if peer != rf.me {
+			go rf.replicateLogToPeer(peer)
+		}
+	}
+	return true
+}
+
+func (rf *Raft) replicateLogToPeer(peer int) {
+	rf.mu.Lock()
+	if rf.state != leader {
+		rf.mu.Unlock()
+		return
+	}
+
+	prevLogIndex := rf.nextIndex[peer] - 1
+	prevLogTerm := rf.log[prevLogIndex].Term
+	entries := rf.log[rf.nextIndex[peer]:]
+	entriesCopy := make([]LogEntry, len(entries))
+	copy(entriesCopy, entries)
+
+	args := &AppendEntriesArgs{
+		Term:         rf.currentTerm,
+		LeaderId:     rf.me,
+		PrevLogIndex: prevLogIndex,
+		PrevLogTerm:  prevLogTerm,
+		LeaderCommit: rf.commitIndex,
+		Entries:      entriesCopy,
+	}
+	rf.mu.Unlock()
+
+	reply := &AppendEntriesReply{}
+	if rf.sendAppendEntries(peer, args, reply) {
+		rf.handleAppendEntriesReply(peer, args, reply)
+	}
+}
+
+func (rf *Raft) handleAppendEntriesReply(peer int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if rf.state != leader || rf.currentTerm != args.Term {
+		return
+	}
+
+	if !reply.Success {
+		if rf.nextIndex[peer] > 1 {
+			rf.nextIndex[peer]--
+		}
+		return
+	}
+
+	rf.nextIndex[peer] = args.PrevLogIndex + len(args.Entries) + 1
+	rf.matchIndex[peer] = args.PrevLogIndex + len(args.Entries)
+	rf.advanceCommitIndex()
 }
 
 // If there exists an N such that N > commitIndex, a majority
@@ -458,64 +473,73 @@ func (rf *Raft) startElection() {
 	defer rf.mu.Unlock()
 	rf.currentTerm++
 	rf.votedFor = rf.me
-	peerCount := len(rf.peers)
-	me := rf.me
 	currentTerm := rf.currentTerm
 	lastLogIndex, lastLogTerm := rf.lastLog()
 
-	votes := make(chan bool, peerCount-1)
+	args := &RequestVoteArgs{
+		Term:         currentTerm,
+		CandidateId:  rf.me,
+		LastLogIndex: lastLogIndex,
+		LastLogTerm:  lastLogTerm,
+	}
 
-	for peer := range peerCount {
+	votes := make(chan bool, len(rf.peers)-1)
+
+	for peer := range rf.peers {
 		if peer == rf.me {
 			continue
 		}
-		args := &RequestVoteArgs{
-			Term:         currentTerm,
-			CandidateId:  me,
-			LastLogIndex: lastLogIndex,
-			LastLogTerm:  lastLogTerm,
-		}
-		reply := &RequestVoteReply{}
-		go func(peer int) {
-			if rf.sendRequestVote(peer, args, reply) {
-				rf.mu.Lock()
-				if reply.Term > rf.currentTerm {
-					rf.currentTerm = reply.Term
-					rf.votedFor = -1
-					rf.state = follower
-					rf.resetElectionTimer()
-				}
-				rf.mu.Unlock()
-				votes <- reply.VoteGranted
-			} else {
-				votes <- false
-			}
-		}(peer)
+		go rf.requestVoteFromPeer(peer, args, votes)
 	}
 
-	go func() {
-		grantedVotes := 1
-		for i := 0; i < peerCount-1; i++ {
-			voteGranted := <-votes
-			if voteGranted {
-				grantedVotes++
-			}
-			rf.mu.Lock()
-			if rf.state == candidate && rf.currentTerm == currentTerm && grantedVotes > peerCount/2.0 {
-				rf.state = leader
-				rf.nextIndex = make([]int, peerCount)
-				// Initialize volatile leader state according to paper
-				for i := range rf.nextIndex {
-					rf.nextIndex[i] = len(rf.log)
-				}
-				rf.matchIndex = make([]int, peerCount)
-				rf.mu.Unlock()
-				go rf.broadcastAppendEntries()
-				return
-			}
-			rf.mu.Unlock()
+	go rf.countVotes(votes, currentTerm)
+}
+
+func (rf *Raft) requestVoteFromPeer(peer int, args *RequestVoteArgs, votes chan bool) {
+	reply := &RequestVoteReply{}
+	if rf.sendRequestVote(peer, args, reply) {
+		rf.mu.Lock()
+		if reply.Term > rf.currentTerm {
+			rf.currentTerm = reply.Term
+			rf.votedFor = -1
+			rf.state = follower
+			rf.resetElectionTimer()
 		}
-	}()
+		rf.mu.Unlock()
+		votes <- reply.VoteGranted
+	} else {
+		votes <- false
+	}
+}
+
+func (rf *Raft) countVotes(votes chan bool, currentTerm int) {
+	grantedVotes := 1
+	peerCount := len(rf.peers)
+	for i := 0; i < peerCount-1; i++ {
+		voteGranted := <-votes
+		if voteGranted {
+			grantedVotes++
+		}
+		rf.mu.Lock()
+		if rf.state == candidate && rf.currentTerm == currentTerm && grantedVotes > peerCount/2.0 {
+			rf.becomeLeader()
+			rf.mu.Unlock()
+			return
+		}
+		rf.mu.Unlock()
+	}
+}
+
+func (rf *Raft) becomeLeader() {
+	rf.state = leader
+	peerCount := len(rf.peers)
+	rf.nextIndex = make([]int, peerCount)
+	// Initialize volatile leader state according to paper
+	for i := range rf.nextIndex {
+		rf.nextIndex[i] = len(rf.log)
+	}
+	rf.matchIndex = make([]int, peerCount)
+	go rf.broadcastAppendEntries()
 }
 
 type AppendEntriesArgs struct {
@@ -617,6 +641,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
@@ -624,7 +650,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.replicationTrigger = make(chan bool, 1)
-	rf.electionTimerReset = make(chan bool, 1)
 	rf.cond = sync.NewCond(&rf.mu)
 
 	rf.currentTerm = 0
@@ -637,8 +662,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
-	// start ticker goroutine to start elections
-	go rf.checkLeaderAlive()
+	// initialize election timer
+	ms := 150 + (rand.Int63() % 150)
+	rf.electionTimer = time.AfterFunc(time.Duration(ms)*time.Millisecond, rf.handleElectionTimeout)
 	go rf.applier()
 
 	return rf
