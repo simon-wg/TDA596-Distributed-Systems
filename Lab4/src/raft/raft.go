@@ -391,12 +391,12 @@ func (rf *Raft) checkCommit() {
 			rf.mu.Unlock()
 			return
 		}
-		count := 1
 		N := len(rf.log) - 1
 		for ; N > rf.commitIndex; N-- {
 			if rf.log[N].Term != rf.currentTerm {
 				continue
 			}
+			count := 1
 			for peer := range rf.peers {
 				if peer == rf.me {
 					continue
@@ -517,33 +517,54 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 		rf.state = follower
+	}
+
+	if args.Term >= rf.currentTerm {
 		rf.lastHeartbeat = time.Now()
 	}
+
 	reply.Success = true
 	reply.Term = rf.currentTerm
-	// Reply false if term < currentTerm
+
 	if args.Term < rf.currentTerm {
 		reply.Success = false
-	} else {
-		rf.lastHeartbeat = time.Now()
-		if args.LeaderCommit > rf.commitIndex {
-			rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
-		}
+		return
 	}
-	// Reply false if log doesn't contain an entry at prevLogIndex whose term matches prevLogTerm
+
 	if args.PrevLogIndex >= len(rf.log) {
 		reply.Success = false
 		return
 	}
+
 	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		reply.Success = false
+		return
 	}
+
 	// If an existing entry conflicts with a new one (same index
 	// but different terms), delete the existing entry and all that
 	// follow it
-	// We instead just truncate the log at PrevLogIndex + 1 and append all new entries
-	rf.log = rf.log[:min(args.PrevLogIndex+1, len(rf.log))]
-	rf.log = append(rf.log, args.Entries...)
+	matchLen := 0
+	for i := range args.Entries {
+		idx := args.PrevLogIndex + 1 + i
+		if idx < len(rf.log) {
+			if rf.log[idx].Term == args.Entries[i].Term {
+				matchLen++
+			} else {
+				// Conflict found, truncate log
+				rf.log = rf.log[:idx]
+				break
+			}
+		}
+	}
+
+	if matchLen < len(args.Entries) {
+		rf.log = append(rf.log, args.Entries[matchLen:]...)
+	}
+
+	if args.LeaderCommit > rf.commitIndex {
+		rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
+	}
 
 	reply.Term = rf.currentTerm
 }
