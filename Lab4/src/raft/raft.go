@@ -68,6 +68,9 @@ type Raft struct {
 	applyCh   chan ApplyMsg
 
 	// Your data here (2A, 2B, 2C).
+	cond               *sync.Cond
+	replicationTrigger chan bool
+
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 	currentTerm int
@@ -270,12 +273,15 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-
 	if rf.state != leader {
 		return -1, -1, false
 	}
 	rf.log = append(rf.log, LogEntry{Command: command, Term: rf.currentTerm})
-	// WAIT FOR MAJORITY TO REPLICATE BEFORE COMMIT AND APPLY
+	// Trigger replication immediately unless there's already one ongoing
+	select {
+	case rf.replicationTrigger <- true:
+	default:
+	}
 	return len(rf.log) - 1, rf.currentTerm, true
 }
 
@@ -298,6 +304,31 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
+func (rf *Raft) applier() {
+	for !rf.killed() {
+		rf.mu.Lock()
+		for rf.lastApplied >= rf.commitIndex {
+			rf.cond.Wait()
+		}
+		commitIndex := rf.commitIndex
+		lastApplied := rf.lastApplied
+		entries := make([]LogEntry, commitIndex-lastApplied)
+		copy(entries, rf.log[lastApplied+1:commitIndex+1])
+		rf.mu.Unlock()
+
+		for i, entry := range entries {
+			rf.applyCh <- ApplyMsg{
+				CommandValid: true,
+				Command:      entry.Command,
+				CommandIndex: lastApplied + 1 + i,
+			}
+		}
+		rf.mu.Lock()
+		rf.lastApplied = commitIndex
+		rf.mu.Unlock()
+	}
+}
+
 func (rf *Raft) checkLeaderAlive() {
 	for !rf.killed() {
 		// Your code here (2A)
@@ -307,24 +338,6 @@ func (rf *Raft) checkLeaderAlive() {
 		ms := 150 + (rand.Int63() % 150)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 		rf.mu.Lock()
-		// If commitIndex is greater than lastApplied, the committed messages should be applied
-		if rf.commitIndex > rf.lastApplied {
-			toApply := []ApplyMsg{}
-			for rf.lastApplied < rf.commitIndex {
-				rf.lastApplied++
-				applyMsg := ApplyMsg{
-					CommandValid: true,
-					Command:      rf.log[rf.lastApplied].Command,
-					CommandIndex: rf.lastApplied,
-				}
-				toApply = append(toApply, applyMsg)
-			}
-			rf.mu.Unlock()
-			for _, msg := range toApply {
-				rf.applyCh <- msg
-			}
-			continue
-		}
 		if rf.state != leader && time.Since(rf.lastHeartbeat) > time.Duration(ms)*time.Millisecond {
 			rf.state = candidate
 			rf.lastHeartbeat = time.Now()
@@ -373,46 +386,46 @@ func (rf *Raft) broadcastAppendEntries() {
 				rf.mu.Lock()
 				rf.nextIndex[peer] = args.PrevLogIndex + len(args.Entries) + 1
 				rf.matchIndex[peer] = args.PrevLogIndex + len(args.Entries)
+				rf.advanceCommitIndex()
 				rf.mu.Unlock()
 			}(peer)
 		}
 		rf.mu.Unlock()
-		time.Sleep(100 * time.Millisecond)
+
+		// Wait for the first of either a replication trigger or 100 ms
+		select {
+		case <-rf.replicationTrigger:
+		case <-time.After(100 * time.Millisecond):
+		}
 	}
 }
 
 // If there exists an N such that N > commitIndex, a majority
 // of matchIndex[i] ≥ N, and log[N].term == currentTerm:
 // set commitIndex = N (§5.3, §5.4).
-func (rf *Raft) checkCommit() {
-	for !rf.killed() {
-		rf.mu.Lock()
-		if rf.state != leader {
-			rf.mu.Unlock()
-			return
+func (rf *Raft) advanceCommitIndex() {
+	if rf.state != leader {
+		return
+	}
+	N := len(rf.log) - 1
+	for ; N > rf.commitIndex; N-- {
+		if rf.log[N].Term != rf.currentTerm {
+			continue
 		}
-		N := len(rf.log) - 1
-		for ; N > rf.commitIndex; N-- {
-			if rf.log[N].Term != rf.currentTerm {
+		count := 1
+		for peer := range rf.peers {
+			if peer == rf.me {
 				continue
 			}
-			count := 1
-			for peer := range rf.peers {
-				if peer == rf.me {
-					continue
-				}
-				if rf.matchIndex[peer] >= N {
-					count++
-				}
-			}
-			if count > len(rf.peers)/2.0 {
-				rf.commitIndex = N
-				break
+			if rf.matchIndex[peer] >= N {
+				count++
 			}
 		}
-		rf.mu.Unlock()
-		// We can sleep for shorter time since this has no RPC calls
-		time.Sleep(200 * time.Millisecond)
+		if count > len(rf.peers)/2.0 {
+			rf.commitIndex = N
+			rf.cond.Broadcast()
+			break
+		}
 	}
 }
 
@@ -475,7 +488,6 @@ func (rf *Raft) startElection() {
 				rf.matchIndex = make([]int, peerCount)
 				rf.mu.Unlock()
 				go rf.broadcastAppendEntries()
-				go rf.checkCommit()
 				return
 			}
 			rf.mu.Unlock()
@@ -564,6 +576,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
+		rf.cond.Broadcast()
 	}
 
 	reply.Term = rf.currentTerm
@@ -587,6 +600,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCh = applyCh
 
 	// Your initialization code here (2A, 2B, 2C).
+	rf.replicationTrigger = make(chan bool, 1)
+	rf.cond = sync.NewCond(&rf.mu)
+
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.log = []LogEntry{{Command: nil, Term: 0}}
@@ -601,6 +617,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.checkLeaderAlive()
+	go rf.applier()
 
 	return rf
 }
