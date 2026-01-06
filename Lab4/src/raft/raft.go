@@ -20,12 +20,14 @@ package raft
 import (
 	//	"bytes"
 
+	"bytes"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 )
 
@@ -138,32 +140,35 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
 }
 
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
-	if data == nil || len(data) < 1 { // bootstrap without any state?
-		return
-	}
+	// if data == nil || len(data) < 1 { // bootstrap without any state?
+	// 	return
+	// }
 	// Your code here (2C).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var log []LogEntry
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil || d.Decode(&log) != nil {
+		return
+	} else {
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.log = log
+	}
 }
 
 // the service says it has created a snapshot that has
@@ -198,6 +203,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 	candidateId := args.CandidateId
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
@@ -262,10 +268,11 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 	if reply.Term > rf.currentTerm {
-		rf.state = follower
 		rf.currentTerm = reply.Term
 		rf.votedFor = -1
+		rf.state = follower
 		rf.resetElectionTimer()
 	}
 	return ok
@@ -286,6 +293,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 	if rf.state != leader {
 		return -1, -1, false
 	}
@@ -473,13 +481,13 @@ func (rf *Raft) advanceCommitIndex() {
 func (rf *Raft) startElection() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 	rf.currentTerm++
 	rf.votedFor = rf.me
-	currentTerm := rf.currentTerm
 	lastLogIndex, lastLogTerm := rf.lastLog()
 
 	args := &RequestVoteArgs{
-		Term:         currentTerm,
+		Term:         rf.currentTerm,
 		CandidateId:  rf.me,
 		LastLogIndex: lastLogIndex,
 		LastLogTerm:  lastLogTerm,
@@ -494,7 +502,7 @@ func (rf *Raft) startElection() {
 		go rf.requestVoteFromPeer(peer, args, votes)
 	}
 
-	go rf.countVotes(votes, currentTerm)
+	go rf.countVotes(votes, rf.currentTerm)
 }
 
 func (rf *Raft) requestVoteFromPeer(peer int, args *RequestVoteArgs, votes chan bool) {
@@ -507,6 +515,7 @@ func (rf *Raft) requestVoteFromPeer(peer int, args *RequestVoteArgs, votes chan 
 			rf.state = follower
 			rf.resetElectionTimer()
 		}
+		rf.persist()
 		rf.mu.Unlock()
 		votes <- reply.VoteGranted
 	} else {
@@ -562,6 +571,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 	if reply.Term > rf.currentTerm {
 		rf.state = follower
 		rf.resetElectionTimer()
@@ -574,6 +584,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
