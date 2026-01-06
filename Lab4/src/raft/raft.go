@@ -432,18 +432,33 @@ func (rf *Raft) replicateLogToPeer(peer int) {
 func (rf *Raft) handleAppendEntriesReply(peer int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-
-	if rf.state != leader || rf.currentTerm != args.Term {
+	// Assert that we still are synchronized
+	if rf.state != leader || rf.currentTerm != args.Term || rf.nextIndex[peer] != args.PrevLogIndex+1 {
 		return
 	}
-
 	if !reply.Success {
-		if rf.nextIndex[peer] > 1 {
-			rf.nextIndex[peer]--
+		if reply.ConflictTerm == -1 {
+			rf.nextIndex[peer] = reply.ConflictIndex
+		} else {
+			lastIndexOfTerm := -1
+			for i := len(rf.log) - 1; i >= 0; i-- {
+				if rf.log[i].Term == reply.ConflictTerm {
+					lastIndexOfTerm = i
+					break
+				}
+			}
+			if lastIndexOfTerm != -1 {
+				rf.nextIndex[peer] = lastIndexOfTerm + 1
+			} else {
+				rf.nextIndex[peer] = reply.ConflictIndex
+			}
 		}
+		if rf.nextIndex[peer] < 1 {
+			rf.nextIndex[peer] = 1
+		}
+		go rf.replicateLogToPeer(peer)
 		return
 	}
-
 	rf.nextIndex[peer] = args.PrevLogIndex + len(args.Entries) + 1
 	rf.matchIndex[peer] = args.PrevLogIndex + len(args.Entries)
 	rf.advanceCommitIndex()
@@ -563,8 +578,10 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int
-	Success bool
+	Term          int
+	Success       bool
+	ConflictIndex int
+	ConflictTerm  int
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -590,32 +607,35 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.votedFor = -1
 		rf.state = follower
 	}
-
 	if args.Term >= rf.currentTerm {
 		rf.resetElectionTimer()
 	}
-
-	reply.Success = true
 	reply.Term = rf.currentTerm
-
+	reply.Success = false
+	reply.ConflictIndex = -1
+	reply.ConflictTerm = -1
 	if args.Term < rf.currentTerm {
-		reply.Success = false
 		return
 	}
-
+	// Log is shorter than PrevLogIndex
 	if args.PrevLogIndex >= len(rf.log) {
-		reply.Success = false
+		reply.ConflictIndex = len(rf.log)
+		reply.ConflictTerm = -1
 		return
 	}
-
+	// Term mismatch at PrevLogIndex
 	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-		reply.Success = false
+		reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
+		// Scan back to find the first index of this conflicting term
+		idx := args.PrevLogIndex
+		for idx > 0 && rf.log[idx-1].Term == reply.ConflictTerm {
+			idx--
+		}
+		reply.ConflictIndex = idx
 		return
 	}
-
-	// If an existing entry conflicts with a new one (same index
-	// but different terms), delete the existing entry and all that
-	// follow it
+	// Log matches, proceed to append
+	reply.Success = true
 	matchLen := 0
 	for i := range args.Entries {
 		idx := args.PrevLogIndex + 1 + i
@@ -623,23 +643,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			if rf.log[idx].Term == args.Entries[i].Term {
 				matchLen++
 			} else {
-				// Conflict found, truncate log
 				rf.log = rf.log[:idx]
 				break
 			}
 		}
 	}
-
 	if matchLen < len(args.Entries) {
 		rf.log = append(rf.log, args.Entries[matchLen:]...)
 	}
-
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
 		rf.cond.Broadcast()
 	}
-
-	reply.Term = rf.currentTerm
 }
 
 // the service or tester wants to create a Raft server. the ports
