@@ -568,6 +568,50 @@ func (rf *Raft) becomeLeader() {
 	go rf.broadcastAppendEntries()
 }
 
+type InstallSnapshotArgs struct {
+	Term              int
+	LeaderId          int
+	LastIncludedIndex int
+	LastIncludedTerm  int
+	Offset            int
+	Data              []byte
+	Done              bool
+}
+
+type InstallSnapshotReply struct {
+	Term int
+}
+
+func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	defer rf.persist()
+	if reply.Term > rf.currentTerm {
+		rf.state = follower
+		rf.resetElectionTimer()
+		rf.currentTerm = reply.Term
+		rf.votedFor = -1
+	}
+	return ok
+}
+
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	defer rf.persist()
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		return
+	}
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.votedFor = -1
+		rf.state = follower
+	}
+	reply.Term = rf.currentTerm
+}
+
 type AppendEntriesArgs struct {
 	Term         int
 	LeaderId     int
